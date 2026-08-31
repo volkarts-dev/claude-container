@@ -27,7 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xz-utils \
         tar \
         procps \
-        socat \
         psmisc \
         htop \
         vim \
