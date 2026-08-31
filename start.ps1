@@ -10,10 +10,11 @@ last component of that path.
 
 The claude container runs on an internal container network with no route off the
 host. Its only way out is the tinyproxy container, which sits on that network as
-http://proxy:3128 and on the engine's default bridge network. That proxy goes out
-over the host connection, or forwards to the corporate proxy named by -Proxy (or
-CLAUDE_PROXY / HTTPS_PROXY / HTTP_PROXY). A proxy container left over from an
-earlier start is reused, and recreated when its upstream differs from the one in
+http://proxy:3128 and on a second, outward-facing network named by -Bridge (or
+CLAUDE_BRIDGE) and created when missing. That proxy goes out over the host
+connection, or forwards to the corporate proxy named by -Proxy (or CLAUDE_PROXY /
+HTTPS_PROXY / HTTP_PROXY). A proxy container left over from an earlier start is
+reused, and recreated when its upstream or either network differs from the one in
 the current environment.
 
 The container frontend is docker or podman, chosen with -Engine or
@@ -56,7 +57,7 @@ $homeDir = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
 $proxyListen = 3128
 
 $hostInternal = if ($Engine -eq 'podman') { 'host.containers.internal' } else { 'host.docker.internal' }
-if (-not $Bridge) { $Bridge = if ($Engine -eq 'podman') { 'podman' } else { 'bridge' } }
+if (-not $Bridge) { $Bridge = "$Network-out" }
 
 $usedNames = [System.Collections.Generic.List[string]]::new()
 function New-MountName([string]$Path) {
@@ -149,6 +150,29 @@ function Initialize-EgressNetwork {
     Write-Host "created internal network $Network"
 }
 
+# Creates the outward-facing network if missing. The engines' predefined bridge
+# networks serve no DNS of their own, and an internal network's resolver refuses
+# to forward, so a proxy on those two alone resolves nothing at all: neither its
+# upstream nor the sites it is asked to fetch.
+function Initialize-BridgeNetwork {
+    $internal = & $Engine network inspect -f '{{.Internal}}' $Bridge 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        if ($internal.Trim() -eq 'true') {
+            throw "network $Bridge is internal; the proxy cannot reach the outside through it"
+        }
+        if ($Engine -eq 'podman') {
+            $dns = & $Engine network inspect -f '{{.DNSEnabled}}' $Bridge 2>$null
+            if ($LASTEXITCODE -eq 0 -and $dns.Trim() -eq 'false') {
+                Write-Warning "network $Bridge serves no DNS, the proxy will not resolve host names"
+            }
+        }
+        return
+    }
+    & $Engine network create $Bridge | Out-Null
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Host "created outward network $Bridge"
+}
+
 # Blocks until tinyproxy answers on its own port. A container whose entrypoint
 # fails still starts cleanly, and the restart policy then hides it in a crash
 # loop, so nothing may rely on the proxy before it has served a request.
@@ -166,9 +190,9 @@ function Wait-Proxy {
 # tinyproxy reads the upstream once at start, so a changed one only reaches it
 # through a container created anew with it.
 function Initialize-Proxy($Upstream) {
-    $labels = & $Engine inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' $ProxyName 2>$null
+    $labels = & $Engine inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}|{{index .Config.Labels "claude.bridge"}}' $ProxyName 2>$null
     $current = if ($LASTEXITCODE -eq 0 -and $labels) { $labels.Trim() } else { '' }
-    if ($current -eq "$($Upstream.Spec)|$Network") {
+    if ($current -eq "$($Upstream.Spec)|$Network|$Bridge") {
         $running = & $Engine inspect -f '{{.State.Running}}' $ProxyName
         if ($running.Trim() -ne 'true') { & $Engine start $ProxyName | Out-Null }
         Wait-Proxy
@@ -192,6 +216,7 @@ function Initialize-Proxy($Upstream) {
         '--network-alias', 'proxy'
         '--label', "claude.upstream=$($Upstream.Spec)"
         '--label', "claude.network=$Network"
+        '--label', "claude.bridge=$Bridge"
         '--cap-drop', 'ALL'
         '--security-opt', 'no-new-privileges'
     )
@@ -237,6 +262,7 @@ if ((-not (Test-Path -LiteralPath $containedConfigFile)) -and (Test-Path -Litera
 
 $upstream = Resolve-Upstream
 Initialize-EgressNetwork
+Initialize-BridgeNetwork
 Initialize-Proxy $upstream
 
 $inProxy = "http://proxy:${proxyListen}"

@@ -17,11 +17,11 @@ Anything after -- is passed on to claude itself.
 Networking
   The claude container runs on an internal container network with no route off
   the host. Its only way out is the tinyproxy container, which sits on that
-  network as http://proxy:3128 and on the engine's default bridge network. That
+  network as http://proxy:3128 and on a second, outward-facing network. That
   proxy goes out over the host connection, or forwards to the corporate proxy
   named by CLAUDE_PROXY. A proxy container left over from an earlier start is
-  reused, and recreated when its upstream differs from the one in the current
-  environment.
+  reused, and recreated when its upstream or either network differs from the one
+  in the current environment.
 
   The proxy image is built on demand; the dev image has to be built beforehand
   with ./build.sh.
@@ -33,8 +33,10 @@ Environment
                    back to HTTPS_PROXY/HTTP_PROXY, unset means direct
   CLAUDE_NO_PROXY  extra no_proxy entries for inside the container
   CLAUDE_NET       internal network name (default claude-egress)
-  CLAUDE_BRIDGE    engine network the proxy reaches the outside on (default
-                   bridge for docker, podman for podman)
+  CLAUDE_BRIDGE    outward-facing network the proxy reaches the outside on,
+                   created when missing (default <CLAUDE_NET>-out); it has to
+                   carry DNS, which the engines' predefined bridge networks do
+                   not
   CLAUDE_USERNS    --userns for the claude container; unset picks keep-id under
                    rootless podman and nothing otherwise
   CLAUDE_IMAGE     dev image name (default claude-dev)
@@ -50,17 +52,17 @@ USAGE
 
 ENGINE="${CONTAINER_ENGINE:-docker}"
 case "$ENGINE" in
-    docker) BRIDGE_DEFAULT="bridge"; HOST_INTERNAL="host.docker.internal" ;;
-    podman) BRIDGE_DEFAULT="podman"; HOST_INTERNAL="host.containers.internal" ;;
+    docker) HOST_INTERNAL="host.docker.internal" ;;
+    podman) HOST_INTERNAL="host.containers.internal" ;;
     *) printf 'start.sh: unknown container engine: %s\n' "$ENGINE" >&2; exit 1 ;;
 esac
-BRIDGE_NET="${CLAUDE_BRIDGE:-$BRIDGE_DEFAULT}"
 
 IMAGE="${CLAUDE_IMAGE:-claude-dev}"
 TAG="${CLAUDE_TAG:-latest}"
 CONTAINER_USER="${CONTAINER_USER:-dev}"
 CONTAINER_HOME="/home/${CONTAINER_USER}"
 NET_NAME="${CLAUDE_NET:-claude-egress}"
+BRIDGE_NET="${CLAUDE_BRIDGE:-${NET_NAME}-out}"
 PROXY_IMAGE="${PROXY_IMAGE:-claude-proxy}"
 PROXY_TAG="${PROXY_TAG:-latest}"
 PROXY_NAME="${PROXY_CONTAINER:-claude-proxy}"
@@ -178,6 +180,25 @@ ensure_network() {
     fi
 }
 
+# Creates the outward-facing network if missing. The engines' predefined bridge
+# networks serve no DNS of their own, and an internal network's resolver refuses
+# to forward, so a proxy on those two alone resolves nothing at all: neither its
+# upstream nor the sites it is asked to fetch.
+ensure_bridge_network() {
+    if "$ENGINE" network inspect "$BRIDGE_NET" >/dev/null 2>&1; then
+        if [ "$("$ENGINE" network inspect -f '{{.Internal}}' "$BRIDGE_NET")" = "true" ]; then
+            printf 'start.sh: network %s is internal; the proxy cannot reach the outside through it\n' "$BRIDGE_NET" >&2
+            exit 1
+        fi
+        if [ "$ENGINE" = "podman" ] && [ "$("$ENGINE" network inspect -f '{{.DNSEnabled}}' "$BRIDGE_NET" 2>/dev/null || true)" = "false" ]; then
+            printf 'start.sh: warning: network %s serves no DNS, the proxy will not resolve host names\n' "$BRIDGE_NET" >&2
+        fi
+    else
+        "$ENGINE" network create "$BRIDGE_NET" >/dev/null
+        printf 'created outward network %s\n' "$BRIDGE_NET" >&2
+    fi
+}
+
 # Blocks until tinyproxy answers on its own port. A container whose entrypoint
 # fails still starts cleanly, and the restart policy then hides it in a crash
 # loop, so nothing may rely on the proxy before it has served a request.
@@ -196,8 +217,8 @@ wait_proxy() {
 # Starts the egress proxy, recreating it when its upstream or network changed.
 ensure_proxy() {
     local args=() described current
-    current="$("$ENGINE" inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' "$PROXY_NAME" 2>/dev/null || true)"
-    if [ "$current" = "${UPSTREAM}|${NET_NAME}" ]; then
+    current="$("$ENGINE" inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}|{{index .Config.Labels "claude.bridge"}}' "$PROXY_NAME" 2>/dev/null || true)"
+    if [ "$current" = "${UPSTREAM}|${NET_NAME}|${BRIDGE_NET}" ]; then
         if [ "$("$ENGINE" inspect -f '{{.State.Running}}' "$PROXY_NAME")" != "true" ]; then
             "$ENGINE" start "$PROXY_NAME" >/dev/null
         fi
@@ -219,6 +240,7 @@ ensure_proxy() {
         --network-alias proxy
         --label "claude.upstream=${UPSTREAM}"
         --label "claude.network=${NET_NAME}"
+        --label "claude.bridge=${BRIDGE_NET}"
         --cap-drop ALL
         --security-opt no-new-privileges
     )
@@ -258,6 +280,7 @@ fi
 
 resolve_upstream
 ensure_network
+ensure_bridge_network
 ensure_proxy
 
 in_proxy="http://proxy:${PROXY_LISTEN}"
