@@ -176,6 +176,21 @@ ensure_network() {
     fi
 }
 
+# Blocks until tinyproxy answers on its own port. A container whose entrypoint
+# fails still starts cleanly, and the restart policy then hides it in a crash
+# loop, so nothing may rely on the proxy before it has served a request.
+wait_proxy() {
+    local i
+    for i in $(seq 20); do
+        if "$ENGINE" exec "$PROXY_NAME" sh -c "http_proxy=http://127.0.0.1:${PROXY_LISTEN} wget -q -O /dev/null http://tinyproxy.stats/" >/dev/null 2>&1; then
+            return
+        fi
+        sleep 0.25
+    done
+    printf 'start.sh: proxy %s is not answering on port %s; see %s logs %s\n' "$PROXY_NAME" "$PROXY_LISTEN" "$ENGINE" "$PROXY_NAME" >&2
+    exit 1
+}
+
 # Starts the egress proxy, recreating it when its upstream or network changed.
 ensure_proxy() {
     local args=() described
@@ -183,6 +198,7 @@ ensure_proxy() {
         if [ "$("$ENGINE" inspect -f '{{.State.Running}}' "$PROXY_NAME")" != "true" ]; then
             "$ENGINE" start "$PROXY_NAME" >/dev/null
         fi
+        wait_proxy
         return
     fi
     if ! "$ENGINE" image inspect "${PROXY_IMAGE}:${PROXY_TAG}" >/dev/null 2>&1; then
@@ -215,6 +231,7 @@ ensure_proxy() {
     "$ENGINE" create "${args[@]}" "${PROXY_IMAGE}:${PROXY_TAG}" >/dev/null
     "$ENGINE" network connect "$BRIDGE_NET" "$PROXY_NAME"
     "$ENGINE" start "$PROXY_NAME" >/dev/null
+    wait_proxy
     described="${UPSTREAM:-direct}"
     printf 'proxy %s serving %s -> %s\n' "$PROXY_NAME" "$NET_NAME" "${described##*@}" >&2
 }

@@ -147,12 +147,26 @@ function Initialize-EgressNetwork {
     Write-Host "created internal network $Network"
 }
 
+# Blocks until tinyproxy answers on its own port. A container whose entrypoint
+# fails still starts cleanly, and the restart policy then hides it in a crash
+# loop, so nothing may rely on the proxy before it has served a request.
+function Wait-Proxy {
+    for ($i = 0; $i -lt 20; $i++) {
+        & $Engine exec $ProxyName sh -c "http_proxy=http://127.0.0.1:${proxyListen} wget -q -O /dev/null http://tinyproxy.stats/" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    Write-Error "proxy $ProxyName is not answering on port $proxyListen; see $Engine logs $ProxyName"
+    exit 1
+}
+
 # Starts the egress proxy, recreating it when its upstream or network changed.
 function Initialize-Proxy($Upstream) {
     $labels = & $Engine inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' $ProxyName 2>$null
     if ($LASTEXITCODE -eq 0 -and $labels.Trim() -eq "$($Upstream.Spec)|$Network") {
         $running = & $Engine inspect -f '{{.State.Running}}' $ProxyName
         if ($running.Trim() -ne 'true') { & $Engine start $ProxyName | Out-Null }
+        Wait-Proxy
         return
     }
 
@@ -188,6 +202,7 @@ function Initialize-Proxy($Upstream) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & $Engine start $ProxyName | Out-Null
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Wait-Proxy
 
     $described = if ($Upstream.Spec) { $Upstream.Spec -replace '^.*@', '' } else { 'direct' }
     Write-Host "proxy $ProxyName serving $Network -> $described"
