@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nano \
         sudo \
         locales \
+        ncurses-term \
         tini \
         man-db \
         build-essential \

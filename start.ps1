@@ -248,7 +248,20 @@ foreach ($p in $Paths) {
 
 $runArgs += @('-w', "/workspace/${workdirName}")
 
-if (-not $NoTty) { $runArgs += '-it' }
+# The terminal type and COLORTERM decide what the programs inside are willing to
+# emit. Windows consoles set neither, so name what Windows Terminal and modern
+# conhost actually support; under pwsh on Linux the host values win.
+if (-not $NoTty) {
+    $runArgs += '-it'
+    $termVal = if ($env:TERM) { $env:TERM } else { 'xterm-256color' }
+    $colorVal = if ($env:COLORTERM) { $env:COLORTERM } else { 'truecolor' }
+    $runArgs += @('-e', "TERM=$termVal", '-e', "COLORTERM=$colorVal")
+    foreach ($name in @('TERM_PROGRAM', 'TERM_PROGRAM_VERSION')) {
+        if (Get-Item -LiteralPath "env:$name" -ErrorAction SilentlyContinue) {
+            $runArgs += @('-e', $name)
+        }
+    }
+}
 
 $gitConfig = Join-Path $homeDir '.gitconfig'
 if (Test-Path -LiteralPath $gitConfig) {

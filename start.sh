@@ -259,8 +259,16 @@ done
 
 args+=(-w "/workspace/${workdir_name}")
 
+# The terminal type and COLORTERM decide what the programs inside are willing to
+# emit; without them TERM falls back to plain xterm and 24-bit colour is dropped.
+# The image carries ncurses-term, so exotic entries like xterm-kitty resolve.
 if [ -t 0 ]; then
     args+=(-it)
+    for var in TERM COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION; do
+        if [ -n "${!var:-}" ]; then
+            args+=(-e "${var}")
+        fi
+    done
 fi
 
 if [ -f "$HOME/.gitconfig" ]; then
