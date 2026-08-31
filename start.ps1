@@ -285,6 +285,7 @@ $runArgs = @(
     '--network', $Network
     '--cap-drop', 'NET_ADMIN'
     '--cap-drop', 'NET_RAW'
+    '--security-opt', 'no-new-privileges'
     '-v', "${configDir}:${containerHome}/.claude"
     '-e', "CLAUDE_CONFIG_DIR=${containerHome}/.claude"
 )
@@ -337,8 +338,7 @@ if (Test-Path -LiteralPath $gitConfig) {
 }
 
 foreach ($var in @('ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN',
-                   'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
-                   'GH_TOKEN', 'GITHUB_TOKEN')) {
+                   'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX')) {
     if (Get-Item -LiteralPath "env:$var" -ErrorAction SilentlyContinue) {
         $runArgs += @('-e', $var)
     }

@@ -31,7 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         htop \
         vim \
         nano \
-        sudo \
         locales \
         ncurses-term \
         tini \
@@ -47,16 +46,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgssapi-krb5-2 \
         libstdc++6 \
         zlib1g \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN install -d -m 0755 /etc/apt/keyrings \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && chmod 0644 /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js from the official nodejs.org build (latest v${NODE_MAJOR}.x), checksum verified
@@ -99,9 +88,12 @@ RUN if getent group "${USER_GID}" >/dev/null; then \
     else \
         useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/bash "${USERNAME}"; \
     fi \
-    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USERNAME}" \
-    && chmod 0440 "/etc/sudoers.d/${USERNAME}" \
     && mkdir -p /workspace && chown "${USER_UID}:${USER_GID}" /workspace
+
+# No path to root from inside: every setuid/setgid bit is cleared and the
+# switch-user tools are removed, so the container user stays the container user.
+RUN find / -xdev -perm /6000 -type f -exec chmod ug-s {} + \
+    && rm -f /bin/su /usr/bin/newgrp /usr/bin/chsh /usr/bin/chfn /usr/bin/gpasswd
 
 USER ${USERNAME}
 ENV HOME=/home/${USERNAME} \

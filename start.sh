@@ -310,6 +310,7 @@ args=(
     --network "${NET_NAME}"
     --cap-drop NET_ADMIN
     --cap-drop NET_RAW
+    --security-opt no-new-privileges
     -v "${CONFIG_DIR}:${CONTAINER_HOME}/.claude"
     -e "CLAUDE_CONFIG_DIR=${CONTAINER_HOME}/.claude"
     -e "HTTP_PROXY=${in_proxy}"
@@ -358,11 +359,7 @@ if [ -f "$HOME/.gitconfig" ]; then
     args+=(-v "$HOME/.gitconfig:${CONTAINER_HOME}/.gitconfig:ro")
 fi
 
-if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK}" ]; then
-    args+=(-v "${SSH_AUTH_SOCK}:/ssh-agent" -e "SSH_AUTH_SOCK=/ssh-agent")
-fi
-
-for var in ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX GH_TOKEN GITHUB_TOKEN; do
+for var in ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX; do
     if [ -n "${!var:-}" ]; then
         args+=(-e "${var}")
     fi
