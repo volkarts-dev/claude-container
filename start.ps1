@@ -13,9 +13,11 @@ host. Its only way out is the tinyproxy container, which sits on that network as
 http://proxy:3128 and on a second, outward-facing network named by -Bridge (or
 CLAUDE_BRIDGE) and created when missing. That proxy goes out over the host
 connection, or forwards to the corporate proxy named by -Proxy (or CLAUDE_PROXY /
-HTTPS_PROXY / HTTP_PROXY). A proxy container left over from an earlier start is
-reused, and recreated when its upstream or either network differs from the one in
-the current environment.
+HTTPS_PROXY / HTTP_PROXY), except for the hosts, domains (.corp.example) and
+networks (10.0.0.0/8) named by -NoProxy (or CLAUDE_NO_PROXY / NO_PROXY), which it
+reaches directly. A proxy container left over from an earlier start is reused,
+and recreated when its upstream, that list or either network differs from the one
+in the current environment.
 
 The container frontend is docker or podman, chosen with -Engine or
 CONTAINER_ENGINE.
@@ -37,7 +39,7 @@ param(
     [string]$Tag = $(if ($env:CLAUDE_TAG) { $env:CLAUDE_TAG } else { 'latest' }),
     [string]$ContainerUser = $(if ($env:CONTAINER_USER) { $env:CONTAINER_USER } else { 'dev' }),
     [string]$Proxy = $($env:CLAUDE_PROXY, $env:HTTPS_PROXY, $env:HTTP_PROXY | Where-Object { $_ } | Select-Object -First 1),
-    [string]$NoProxy = $env:CLAUDE_NO_PROXY,
+    [string]$NoProxy = $($env:CLAUDE_NO_PROXY, $env:NO_PROXY | Where-Object { $_ } | Select-Object -First 1),
     [string]$Network = $(if ($env:CLAUDE_NET) { $env:CLAUDE_NET } else { 'claude-egress' }),
     [string]$Bridge = $env:CLAUDE_BRIDGE,
     [string]$UserNs = $env:CLAUDE_USERNS,
@@ -186,13 +188,13 @@ function Wait-Proxy {
     exit 1
 }
 
-# Starts the egress proxy, recreating it when its upstream or network changed.
-# tinyproxy reads the upstream once at start, so a changed one only reaches it
-# through a container created anew with it.
+# Starts the egress proxy, recreating it when its upstream, the hosts kept off
+# that upstream or a network changed. tinyproxy reads both once at start, so a
+# change only reaches it through a container created anew with it.
 function Initialize-Proxy($Upstream) {
-    $labels = & $Engine inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}|{{index .Config.Labels "claude.bridge"}}' $ProxyName 2>$null
+    $labels = & $Engine inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.noupstream"}}|{{index .Config.Labels "claude.network"}}|{{index .Config.Labels "claude.bridge"}}' $ProxyName 2>$null
     $current = if ($LASTEXITCODE -eq 0 -and $labels) { $labels.Trim() } else { '' }
-    if ($current -eq "$($Upstream.Spec)|$Network|$Bridge") {
+    if ($current -eq "$($Upstream.Spec)|$NoProxy|$Network|$Bridge") {
         $running = & $Engine inspect -f '{{.State.Running}}' $ProxyName
         if ($running.Trim() -ne 'true') { & $Engine start $ProxyName | Out-Null }
         Wait-Proxy
@@ -215,12 +217,14 @@ function Initialize-Proxy($Upstream) {
         '--network', $Network
         '--network-alias', 'proxy'
         '--label', "claude.upstream=$($Upstream.Spec)"
+        '--label', "claude.noupstream=$NoProxy"
         '--label', "claude.network=$Network"
         '--label', "claude.bridge=$Bridge"
         '--cap-drop', 'ALL'
         '--security-opt', 'no-new-privileges'
     )
     if ($Upstream.Spec) { $createArgs += @('-e', "UPSTREAM_PROXY=$($Upstream.Spec)") }
+    if ($NoProxy) { $createArgs += @('-e', "NO_UPSTREAM=$NoProxy") }
     if ($Upstream.HostGateway) { $createArgs += @('--add-host', "${hostInternal}:host-gateway") }
     if ($ProxyPublish) { $createArgs += @('-p', "${ProxyBind}:${ProxyPublish}:${proxyListen}") }
     $createArgs += "${ProxyImage}:${ProxyTag}"
@@ -267,7 +271,6 @@ Initialize-Proxy $upstream
 
 $inProxy = "http://proxy:${proxyListen}"
 $noProxyVal = 'localhost,127.0.0.1,::1,proxy'
-if ($NoProxy) { $noProxyVal += ",$NoProxy" }
 
 # Rootless podman maps the invoking user to root inside, which would leave the
 # bind-mounted workspace owned by the wrong uid for the container user.

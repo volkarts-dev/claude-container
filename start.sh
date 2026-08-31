@@ -19,9 +19,10 @@ Networking
   the host. Its only way out is the tinyproxy container, which sits on that
   network as http://proxy:3128 and on a second, outward-facing network. That
   proxy goes out over the host connection, or forwards to the corporate proxy
-  named by CLAUDE_PROXY. A proxy container left over from an earlier start is
-  reused, and recreated when its upstream or either network differs from the one
-  in the current environment.
+  named by CLAUDE_PROXY, except for the hosts named by CLAUDE_NO_PROXY. A proxy
+  container left over from an earlier start is reused, and recreated when its
+  upstream, that list or either network differs from the one in the current
+  environment.
 
   The proxy image is built on demand; the dev image has to be built beforehand
   with ./build.sh.
@@ -31,7 +32,9 @@ Environment
   CLAUDE_PROXY     corporate proxy the egress forwards to, e.g.
                    http://proxy.corp:3128 or http://user:pass@host:port; falls
                    back to HTTPS_PROXY/HTTP_PROXY, unset means direct
-  CLAUDE_NO_PROXY  extra no_proxy entries for inside the container
+  CLAUDE_NO_PROXY  comma-separated hosts, domains (.corp.example) and networks
+                   (10.0.0.0/8) the proxy reaches directly instead of through
+                   the upstream; falls back to NO_PROXY
   CLAUDE_NET       internal network name (default claude-egress)
   CLAUDE_BRIDGE    outward-facing network the proxy reaches the outside on,
                    created when missing (default <CLAUDE_NET>-out); it has to
@@ -69,6 +72,7 @@ PROXY_NAME="${PROXY_CONTAINER:-claude-proxy}"
 PROXY_PUBLISH="${PROXY_PORT:-}"
 PROXY_BIND="${PROXY_BIND:-127.0.0.1}"
 PROXY_LISTEN=3128
+NO_UPSTREAM="${CLAUDE_NO_PROXY:-${NO_PROXY:-${no_proxy:-}}}"
 
 paths=()
 claude_args=()
@@ -214,11 +218,12 @@ wait_proxy() {
     exit 1
 }
 
-# Starts the egress proxy, recreating it when its upstream or network changed.
+# Starts the egress proxy, recreating it when its upstream, the hosts kept off
+# that upstream or a network changed.
 ensure_proxy() {
     local args=() described current
-    current="$("$ENGINE" inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}|{{index .Config.Labels "claude.bridge"}}' "$PROXY_NAME" 2>/dev/null || true)"
-    if [ "$current" = "${UPSTREAM}|${NET_NAME}|${BRIDGE_NET}" ]; then
+    current="$("$ENGINE" inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.noupstream"}}|{{index .Config.Labels "claude.network"}}|{{index .Config.Labels "claude.bridge"}}' "$PROXY_NAME" 2>/dev/null || true)"
+    if [ "$current" = "${UPSTREAM}|${NO_UPSTREAM}|${NET_NAME}|${BRIDGE_NET}" ]; then
         if [ "$("$ENGINE" inspect -f '{{.State.Running}}' "$PROXY_NAME")" != "true" ]; then
             "$ENGINE" start "$PROXY_NAME" >/dev/null
         fi
@@ -239,6 +244,7 @@ ensure_proxy() {
         --network "$NET_NAME"
         --network-alias proxy
         --label "claude.upstream=${UPSTREAM}"
+        --label "claude.noupstream=${NO_UPSTREAM}"
         --label "claude.network=${NET_NAME}"
         --label "claude.bridge=${BRIDGE_NET}"
         --cap-drop ALL
@@ -246,6 +252,9 @@ ensure_proxy() {
     )
     if [ -n "$UPSTREAM" ]; then
         args+=(-e "UPSTREAM_PROXY=${UPSTREAM}")
+    fi
+    if [ -n "$NO_UPSTREAM" ]; then
+        args+=(-e "NO_UPSTREAM=${NO_UPSTREAM}")
     fi
     if [ "$HOST_GATEWAY" -eq 1 ]; then
         args+=(--add-host "${HOST_INTERNAL}:host-gateway")
@@ -284,7 +293,7 @@ ensure_bridge_network
 ensure_proxy
 
 in_proxy="http://proxy:${PROXY_LISTEN}"
-no_proxy_val="localhost,127.0.0.1,::1,proxy${CLAUDE_NO_PROXY:+,${CLAUDE_NO_PROXY}}"
+no_proxy_val="localhost,127.0.0.1,::1,proxy"
 
 # Rootless podman maps the invoking user to root inside, which would leave the
 # bind-mounted workspace owned by the wrong uid for the container user.
