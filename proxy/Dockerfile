@@ -1,6 +1,11 @@
-FROM alpine:3.24
+FROM debian:13-slim
 
-RUN apk add --no-cache tinyproxy
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tinyproxy \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
