@@ -12,7 +12,9 @@ The claude container runs on an internal container network with no route off the
 host. Its only way out is the tinyproxy container, which sits on that network as
 http://proxy:3128 and on the engine's default bridge network. That proxy goes out
 over the host connection, or forwards to the corporate proxy named by -Proxy (or
-CLAUDE_PROXY / HTTPS_PROXY / HTTP_PROXY).
+CLAUDE_PROXY / HTTPS_PROXY / HTTP_PROXY). A proxy container left over from an
+earlier start is reused, and recreated when its upstream differs from the one in
+the current environment.
 
 The container frontend is docker or podman, chosen with -Engine or
 CONTAINER_ENGINE.
@@ -161,14 +163,18 @@ function Wait-Proxy {
 }
 
 # Starts the egress proxy, recreating it when its upstream or network changed.
+# tinyproxy reads the upstream once at start, so a changed one only reaches it
+# through a container created anew with it.
 function Initialize-Proxy($Upstream) {
     $labels = & $Engine inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' $ProxyName 2>$null
-    if ($LASTEXITCODE -eq 0 -and $labels.Trim() -eq "$($Upstream.Spec)|$Network") {
+    $current = if ($LASTEXITCODE -eq 0 -and $labels) { $labels.Trim() } else { '' }
+    if ($current -eq "$($Upstream.Spec)|$Network") {
         $running = & $Engine inspect -f '{{.State.Running}}' $ProxyName
         if ($running.Trim() -ne 'true') { & $Engine start $ProxyName | Out-Null }
         Wait-Proxy
         return
     }
+    if ($current) { Write-Host "proxy settings changed, recreating $ProxyName" }
 
     & $Engine image inspect "${ProxyImage}:${ProxyTag}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {

@@ -19,7 +19,9 @@ Networking
   the host. Its only way out is the tinyproxy container, which sits on that
   network as http://proxy:3128 and on the engine's default bridge network. That
   proxy goes out over the host connection, or forwards to the corporate proxy
-  named by CLAUDE_PROXY.
+  named by CLAUDE_PROXY. A proxy container left over from an earlier start is
+  reused, and recreated when its upstream differs from the one in the current
+  environment.
 
   The proxy image is built on demand; the dev image has to be built beforehand
   with ./build.sh.
@@ -193,13 +195,17 @@ wait_proxy() {
 
 # Starts the egress proxy, recreating it when its upstream or network changed.
 ensure_proxy() {
-    local args=() described
-    if [ "$("$ENGINE" inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' "$PROXY_NAME" 2>/dev/null || true)" = "${UPSTREAM}|${NET_NAME}" ]; then
+    local args=() described current
+    current="$("$ENGINE" inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' "$PROXY_NAME" 2>/dev/null || true)"
+    if [ "$current" = "${UPSTREAM}|${NET_NAME}" ]; then
         if [ "$("$ENGINE" inspect -f '{{.State.Running}}' "$PROXY_NAME")" != "true" ]; then
             "$ENGINE" start "$PROXY_NAME" >/dev/null
         fi
         wait_proxy
         return
+    fi
+    if [ -n "$current" ]; then
+        printf 'proxy settings changed, recreating %s\n' "$PROXY_NAME" >&2
     fi
     if ! "$ENGINE" image inspect "${PROXY_IMAGE}:${PROXY_TAG}" >/dev/null 2>&1; then
         CONTAINER_ENGINE="$ENGINE" "${SCRIPT_DIR}/build.sh" proxy
