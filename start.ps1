@@ -8,11 +8,14 @@ The current directory is always mounted and used as the working directory. Each
 additional path given is mounted read-write under /workspace, named after the
 last component of that path.
 
-The claude container runs on an internal Docker network with no route off the
+The claude container runs on an internal container network with no route off the
 host. Its only way out is the tinyproxy container, which sits on that network as
-http://proxy:3128 and on the default bridge. That proxy goes out over the host
-connection, or forwards to the corporate proxy named by -Proxy (or CLAUDE_PROXY
-/ HTTPS_PROXY / HTTP_PROXY).
+http://proxy:3128 and on the engine's default bridge network. That proxy goes out
+over the host connection, or forwards to the corporate proxy named by -Proxy (or
+CLAUDE_PROXY / HTTPS_PROXY / HTTP_PROXY).
+
+The container frontend is docker or podman, chosen with -Engine or
+CONTAINER_ENGINE.
 
 The proxy image is built on demand; the dev image has to be built beforehand
 with ./build.ps1.
@@ -25,12 +28,16 @@ param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Paths,
     [string[]]$ClaudeArgs,
+    [ValidateSet('docker', 'podman')]
+    [string]$Engine = $(if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE } else { 'docker' }),
     [string]$Image = $(if ($env:CLAUDE_IMAGE) { $env:CLAUDE_IMAGE } else { 'claude-dev' }),
     [string]$Tag = $(if ($env:CLAUDE_TAG) { $env:CLAUDE_TAG } else { 'latest' }),
     [string]$ContainerUser = $(if ($env:CONTAINER_USER) { $env:CONTAINER_USER } else { 'dev' }),
     [string]$Proxy = $(($env:CLAUDE_PROXY, $env:HTTPS_PROXY, $env:HTTP_PROXY | Where-Object { $_ })[0]),
     [string]$NoProxy = $env:CLAUDE_NO_PROXY,
     [string]$Network = $(if ($env:CLAUDE_NET) { $env:CLAUDE_NET } else { 'claude-egress' }),
+    [string]$Bridge = $env:CLAUDE_BRIDGE,
+    [string]$UserNs = $env:CLAUDE_USERNS,
     [string]$ProxyImage = $(if ($env:PROXY_IMAGE) { $env:PROXY_IMAGE } else { 'claude-proxy' }),
     [string]$ProxyTag = $(if ($env:PROXY_TAG) { $env:PROXY_TAG } else { 'latest' }),
     [string]$ProxyName = $(if ($env:PROXY_CONTAINER) { $env:PROXY_CONTAINER } else { 'claude-proxy' }),
@@ -45,6 +52,9 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $containerHome = "/home/$ContainerUser"
 $homeDir = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
 $proxyListen = 3128
+
+$hostInternal = if ($Engine -eq 'podman') { 'host.containers.internal' } else { 'host.docker.internal' }
+if (-not $Bridge) { $Bridge = if ($Engine -eq 'podman') { 'podman' } else { 'bridge' } }
 
 $usedNames = [System.Collections.Generic.List[string]]::new()
 function New-MountName([string]$Path) {
@@ -106,7 +116,7 @@ function Split-ProxyUrl([string]$Url) {
 }
 
 # The [creds@]host:port tinyproxy forwards to, empty for direct egress, plus
-# whether that host is the docker host itself.
+# whether that host is the container host itself.
 function Resolve-Upstream {
     if (-not $Proxy) {
         return [pscustomobject]@{ Spec = ''; HostGateway = $false }
@@ -114,8 +124,8 @@ function Resolve-Upstream {
     $parsed = Split-ProxyUrl $Proxy
     $target = $parsed.Host
     $hostGateway = $false
-    if ($target -in @('localhost', '127.0.0.1', '::1', '[::1]', 'host.docker.internal')) {
-        $target = 'host.docker.internal'
+    if ($target -in @('localhost', '127.0.0.1', '::1', '[::1]', 'host.docker.internal', 'host.containers.internal')) {
+        $target = $hostInternal
         $hostGateway = $true
     }
     $credPart = if ($parsed.Creds) { "$($parsed.Creds)@" } else { '' }
@@ -125,34 +135,34 @@ function Resolve-Upstream {
 # Creates the internal network if missing, and refuses a same-named one that
 # would let the claude container out on its own.
 function Initialize-EgressNetwork {
-    $internal = & docker network inspect -f '{{.Internal}}' $Network 2>$null
+    $internal = & $Engine network inspect -f '{{.Internal}}' $Network 2>$null
     if ($LASTEXITCODE -eq 0) {
         if ($internal.Trim() -ne 'true') {
             throw "network $Network exists but is not internal; remove it or set CLAUDE_NET"
         }
         return
     }
-    & docker network create --internal $Network | Out-Null
+    & $Engine network create --internal $Network | Out-Null
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host "created internal network $Network"
 }
 
 # Starts the egress proxy, recreating it when its upstream or network changed.
 function Initialize-Proxy($Upstream) {
-    $labels = & docker inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' $ProxyName 2>$null
+    $labels = & $Engine inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' $ProxyName 2>$null
     if ($LASTEXITCODE -eq 0 -and $labels.Trim() -eq "$($Upstream.Spec)|$Network") {
-        $running = & docker inspect -f '{{.State.Running}}' $ProxyName
-        if ($running.Trim() -ne 'true') { & docker start $ProxyName | Out-Null }
+        $running = & $Engine inspect -f '{{.State.Running}}' $ProxyName
+        if ($running.Trim() -ne 'true') { & $Engine start $ProxyName | Out-Null }
         return
     }
 
-    & docker image inspect "${ProxyImage}:${ProxyTag}" 2>$null | Out-Null
+    & $Engine image inspect "${ProxyImage}:${ProxyTag}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        & (Join-Path $scriptDir 'build.ps1') proxy
+        & (Join-Path $scriptDir 'build.ps1') proxy -Engine $Engine
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
-    & docker rm -f $ProxyName 2>$null | Out-Null
+    & $Engine rm -f $ProxyName 2>$null | Out-Null
 
     $createArgs = @(
         'create'
@@ -166,24 +176,24 @@ function Initialize-Proxy($Upstream) {
         '--security-opt', 'no-new-privileges'
     )
     if ($Upstream.Spec) { $createArgs += @('-e', "UPSTREAM_PROXY=$($Upstream.Spec)") }
-    if ($Upstream.HostGateway) { $createArgs += @('--add-host', 'host.docker.internal:host-gateway') }
+    if ($Upstream.HostGateway) { $createArgs += @('--add-host', "${hostInternal}:host-gateway") }
     if ($ProxyPublish) { $createArgs += @('-p', "${ProxyBind}:${ProxyPublish}:${proxyListen}") }
     $createArgs += "${ProxyImage}:${ProxyTag}"
 
     # Created, bridged, then started: tinyproxy must never come up on a container
     # that cannot yet resolve its upstream.
-    & docker @createArgs | Out-Null
+    & $Engine @createArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & docker network connect bridge $ProxyName
+    & $Engine network connect $Bridge $ProxyName
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & docker start $ProxyName | Out-Null
+    & $Engine start $ProxyName | Out-Null
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     $described = if ($Upstream.Spec) { $Upstream.Spec -replace '^.*@', '' } else { 'direct' }
     Write-Host "proxy $ProxyName serving $Network -> $described"
 }
 
-& docker image inspect "${Image}:${Tag}" 2>$null | Out-Null
+& $Engine image inspect "${Image}:${Tag}" 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Error "image ${Image}:${Tag} is missing; run $scriptDir/build.ps1"
     exit 1
@@ -212,6 +222,13 @@ $inProxy = "http://proxy:${proxyListen}"
 $noProxyVal = 'localhost,127.0.0.1,::1,proxy'
 if ($NoProxy) { $noProxyVal += ",$NoProxy" }
 
+# Rootless podman maps the invoking user to root inside, which would leave the
+# bind-mounted workspace owned by the wrong uid for the container user.
+if (-not $PSBoundParameters.ContainsKey('UserNs') -and $null -eq $env:CLAUDE_USERNS -and $Engine -eq 'podman') {
+    $rootless = & $Engine info -f '{{.Host.Security.Rootless}}' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $rootless.Trim() -eq 'true') { $UserNs = 'keep-id' }
+}
+
 $runArgs = @(
     'run'
     '--rm'
@@ -221,6 +238,7 @@ $runArgs = @(
     '-v', "${configDir}:${containerHome}/.claude"
     '-e', "CLAUDE_CONFIG_DIR=${containerHome}/.claude"
 )
+if ($UserNs) { $runArgs += @('--userns', $UserNs) }
 
 foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')) {
     $runArgs += @('-e', "${name}=${inProxy}")
@@ -280,5 +298,5 @@ $runArgs += "${Image}:${Tag}"
 $runArgs += 'claude'
 if ($ClaudeArgs) { $runArgs += $ClaudeArgs }
 
-& docker @runArgs
+& $Engine @runArgs
 exit $LASTEXITCODE

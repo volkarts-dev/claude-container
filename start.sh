@@ -15,20 +15,26 @@ component of that path.
 Anything after -- is passed on to claude itself.
 
 Networking
-  The claude container runs on an internal Docker network with no route off the
-  host. Its only way out is the tinyproxy container, which sits on that network
-  as http://proxy:3128 and on the default bridge. That proxy goes out over the
-  host connection, or forwards to the corporate proxy named by CLAUDE_PROXY.
+  The claude container runs on an internal container network with no route off
+  the host. Its only way out is the tinyproxy container, which sits on that
+  network as http://proxy:3128 and on the engine's default bridge network. That
+  proxy goes out over the host connection, or forwards to the corporate proxy
+  named by CLAUDE_PROXY.
 
   The proxy image is built on demand; the dev image has to be built beforehand
   with ./build.sh.
 
 Environment
+  CONTAINER_ENGINE container frontend, docker or podman (default docker)
   CLAUDE_PROXY     corporate proxy the egress forwards to, e.g.
                    http://proxy.corp:3128 or http://user:pass@host:port; falls
                    back to HTTPS_PROXY/HTTP_PROXY, unset means direct
   CLAUDE_NO_PROXY  extra no_proxy entries for inside the container
   CLAUDE_NET       internal network name (default claude-egress)
+  CLAUDE_BRIDGE    engine network the proxy reaches the outside on (default
+                   bridge for docker, podman for podman)
+  CLAUDE_USERNS    --userns for the claude container; unset picks keep-id under
+                   rootless podman and nothing otherwise
   CLAUDE_IMAGE     dev image name (default claude-dev)
   CLAUDE_TAG       dev image tag (default latest)
   CONTAINER_USER   user inside the dev image (default dev)
@@ -39,6 +45,14 @@ Environment
   PROXY_BIND       host address for that port (default 127.0.0.1)
 USAGE
 }
+
+ENGINE="${CONTAINER_ENGINE:-docker}"
+case "$ENGINE" in
+    docker) BRIDGE_DEFAULT="bridge"; HOST_INTERNAL="host.docker.internal" ;;
+    podman) BRIDGE_DEFAULT="podman"; HOST_INTERNAL="host.containers.internal" ;;
+    *) printf 'start.sh: unknown container engine: %s\n' "$ENGINE" >&2; exit 1 ;;
+esac
+BRIDGE_NET="${CLAUDE_BRIDGE:-$BRIDGE_DEFAULT}"
 
 IMAGE="${CLAUDE_IMAGE:-claude-dev}"
 TAG="${CLAUDE_TAG:-latest}"
@@ -129,7 +143,7 @@ parse_proxy() {
 }
 
 # Sets UPSTREAM to the [creds@]host:port tinyproxy forwards to, empty for direct
-# egress, and HOST_GATEWAY when that host is the docker host itself.
+# egress, and HOST_GATEWAY when that host is the container host itself.
 resolve_upstream() {
     local url="${CLAUDE_PROXY:-${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}}"
     UPSTREAM=""
@@ -140,8 +154,8 @@ resolve_upstream() {
         exit 1
     fi
     case "$PROXY_HOST" in
-        localhost|127.0.0.1|::1|\[::1\]|host.docker.internal)
-            PROXY_HOST="host.docker.internal"
+        localhost|127.0.0.1|::1|\[::1\]|host.docker.internal|host.containers.internal)
+            PROXY_HOST="$HOST_INTERNAL"
             HOST_GATEWAY=1
             ;;
     esac
@@ -151,13 +165,13 @@ resolve_upstream() {
 # Creates the internal network if missing, and refuses a same-named one that
 # would let the claude container out on its own.
 ensure_network() {
-    if docker network inspect "$NET_NAME" >/dev/null 2>&1; then
-        if [ "$(docker network inspect -f '{{.Internal}}' "$NET_NAME")" != "true" ]; then
+    if "$ENGINE" network inspect "$NET_NAME" >/dev/null 2>&1; then
+        if [ "$("$ENGINE" network inspect -f '{{.Internal}}' "$NET_NAME")" != "true" ]; then
             printf 'start.sh: network %s exists but is not internal; remove it or set CLAUDE_NET\n' "$NET_NAME" >&2
             exit 1
         fi
     else
-        docker network create --internal "$NET_NAME" >/dev/null
+        "$ENGINE" network create --internal "$NET_NAME" >/dev/null
         printf 'created internal network %s\n' "$NET_NAME" >&2
     fi
 }
@@ -165,16 +179,16 @@ ensure_network() {
 # Starts the egress proxy, recreating it when its upstream or network changed.
 ensure_proxy() {
     local args=() described
-    if [ "$(docker inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' "$PROXY_NAME" 2>/dev/null || true)" = "${UPSTREAM}|${NET_NAME}" ]; then
-        if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_NAME")" != "true" ]; then
-            docker start "$PROXY_NAME" >/dev/null
+    if [ "$("$ENGINE" inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.network"}}' "$PROXY_NAME" 2>/dev/null || true)" = "${UPSTREAM}|${NET_NAME}" ]; then
+        if [ "$("$ENGINE" inspect -f '{{.State.Running}}' "$PROXY_NAME")" != "true" ]; then
+            "$ENGINE" start "$PROXY_NAME" >/dev/null
         fi
         return
     fi
-    if ! docker image inspect "${PROXY_IMAGE}:${PROXY_TAG}" >/dev/null 2>&1; then
-        "${SCRIPT_DIR}/build.sh" proxy
+    if ! "$ENGINE" image inspect "${PROXY_IMAGE}:${PROXY_TAG}" >/dev/null 2>&1; then
+        CONTAINER_ENGINE="$ENGINE" "${SCRIPT_DIR}/build.sh" proxy
     fi
-    docker rm -f "$PROXY_NAME" >/dev/null 2>&1 || true
+    "$ENGINE" rm -f "$PROXY_NAME" >/dev/null 2>&1 || true
 
     args=(
         --name "$PROXY_NAME"
@@ -190,7 +204,7 @@ ensure_proxy() {
         args+=(-e "UPSTREAM_PROXY=${UPSTREAM}")
     fi
     if [ "$HOST_GATEWAY" -eq 1 ]; then
-        args+=(--add-host "host.docker.internal:host-gateway")
+        args+=(--add-host "${HOST_INTERNAL}:host-gateway")
     fi
     if [ -n "$PROXY_PUBLISH" ]; then
         args+=(-p "${PROXY_BIND}:${PROXY_PUBLISH}:${PROXY_LISTEN}")
@@ -198,14 +212,14 @@ ensure_proxy() {
 
     # Created, bridged, then started: tinyproxy must never come up on a container
     # that cannot yet resolve its upstream.
-    docker create "${args[@]}" "${PROXY_IMAGE}:${PROXY_TAG}" >/dev/null
-    docker network connect bridge "$PROXY_NAME"
-    docker start "$PROXY_NAME" >/dev/null
+    "$ENGINE" create "${args[@]}" "${PROXY_IMAGE}:${PROXY_TAG}" >/dev/null
+    "$ENGINE" network connect "$BRIDGE_NET" "$PROXY_NAME"
+    "$ENGINE" start "$PROXY_NAME" >/dev/null
     described="${UPSTREAM:-direct}"
     printf 'proxy %s serving %s -> %s\n' "$PROXY_NAME" "$NET_NAME" "${described##*@}" >&2
 }
 
-if ! docker image inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+if ! "$ENGINE" image inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
     printf 'start.sh: image %s:%s is missing; run %s/build.sh\n' "$IMAGE" "$TAG" "$SCRIPT_DIR" >&2
     exit 1
 fi
@@ -226,6 +240,16 @@ ensure_proxy
 in_proxy="http://proxy:${PROXY_LISTEN}"
 no_proxy_val="localhost,127.0.0.1,::1,proxy${CLAUDE_NO_PROXY:+,${CLAUDE_NO_PROXY}}"
 
+# Rootless podman maps the invoking user to root inside, which would leave the
+# bind-mounted workspace owned by the wrong uid for the container user.
+if [ -n "${CLAUDE_USERNS+x}" ]; then
+    USERNS="${CLAUDE_USERNS}"
+elif [ "$ENGINE" = "podman" ] && [ "$("$ENGINE" info -f '{{.Host.Security.Rootless}}' 2>/dev/null || true)" = "true" ]; then
+    USERNS="keep-id"
+else
+    USERNS=""
+fi
+
 args=(
     --rm
     --network "${NET_NAME}"
@@ -240,6 +264,10 @@ args=(
     -e "NO_PROXY=${no_proxy_val}"
     -e "no_proxy=${no_proxy_val}"
 )
+
+if [ -n "$USERNS" ]; then
+    args+=(--userns "$USERNS")
+fi
 
 pwd_abs="$(pwd -P)"
 assign_name "$(basename -- "${pwd_abs}")"
@@ -285,4 +313,4 @@ for var in ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE
     fi
 done
 
-exec docker run "${args[@]}" "${IMAGE}:${TAG}" claude ${claude_args[@]+"${claude_args[@]}"}
+exec "$ENGINE" run "${args[@]}" "${IMAGE}:${TAG}" claude ${claude_args[@]+"${claude_args[@]}"}

@@ -17,6 +17,8 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('claude', 'proxy', 'all')]
     [string]$Target = 'all',
+    [ValidateSet('docker', 'podman')]
+    [string]$Engine = $(if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE } else { 'docker' }),
     [string]$Image = $(if ($env:CLAUDE_IMAGE) { $env:CLAUDE_IMAGE } else { 'claude-dev' }),
     [string]$Tag = $(if ($env:CLAUDE_TAG) { $env:CLAUDE_TAG } else { 'latest' }),
     [string]$ContainerUser = $(if ($env:CONTAINER_USER) { $env:CONTAINER_USER } else { 'dev' }),
@@ -53,7 +55,7 @@ function Build-ClaudeImage {
     if ($DockerArgs) { $buildArgs += $DockerArgs }
     $buildArgs += (Join-Path $scriptDir 'claude')
 
-    & docker @buildArgs
+    & $Engine @buildArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host "built ${Image}:${Tag}"
 }
@@ -63,7 +65,7 @@ function Build-ProxyImage {
     if ($DockerArgs) { $buildArgs += $DockerArgs }
     $buildArgs += (Join-Path $scriptDir 'proxy')
 
-    & docker @buildArgs
+    & $Engine @buildArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host "built ${ProxyImage}:${ProxyTag}"
 }

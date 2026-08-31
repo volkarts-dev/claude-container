@@ -10,9 +10,10 @@ usage: build.sh [TARGET...] [-- DOCKER_BUILD_ARG...]
 Builds the container images. TARGET is claude or proxy; without one both are
 built.
 
-Anything after -- is passed on to docker build.
+Anything after -- is passed on to the engine's build command.
 
 Environment
+  CONTAINER_ENGINE container frontend, docker or podman (default docker)
   CLAUDE_IMAGE     dev image name (default claude-dev)
   CLAUDE_TAG       dev image tag (default latest)
   CONTAINER_USER   user inside the dev image (default dev)
@@ -22,6 +23,12 @@ Environment
   PROXY_TAG        proxy image tag (default latest)
 USAGE
 }
+
+ENGINE="${CONTAINER_ENGINE:-docker}"
+case "$ENGINE" in
+    docker|podman) ;;
+    *) printf 'build.sh: unknown container engine: %s\n' "$ENGINE" >&2; exit 1 ;;
+esac
 
 CLAUDE_IMAGE="${CLAUDE_IMAGE:-claude-dev}"
 CLAUDE_TAG="${CLAUDE_TAG:-latest}"
@@ -44,7 +51,7 @@ done
 [ ${#targets[@]} -eq 0 ] && targets=(claude proxy)
 
 build_claude() {
-    docker build \
+    "$ENGINE" build \
         --build-arg "USER_UID=$(id -u)" \
         --build-arg "USER_GID=$(id -g)" \
         --build-arg "USERNAME=${CONTAINER_USER}" \
@@ -57,7 +64,7 @@ build_claude() {
 }
 
 build_proxy() {
-    docker build \
+    "$ENGINE" build \
         -t "${PROXY_IMAGE}:${PROXY_TAG}" \
         ${build_args[@]+"${build_args[@]}"} \
         "${SCRIPT_DIR}/proxy"
