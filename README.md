@@ -117,7 +117,11 @@ Pass arguments through to `claude` itself after `--`:
 
 ```powershell
 ./start.ps1 ..\shared-lib -ClaudeArgs --resume
+./start.ps1 ..\shared-lib ~\data -ClaudeArgs --model,opus
 ```
+
+In PowerShell several `claude` arguments have to be one comma-separated list, since
+everything not attached to `-ClaudeArgs` is taken as a path to mount.
 
 Use podman instead of docker:
 

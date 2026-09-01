@@ -1,6 +1,9 @@
 #!/usr/bin/env pwsh
 
-[CmdletBinding()]
+# PositionalBinding stays off: with it on, every parameter below is positional
+# too, so a second PATH binds to -ClaudeArgs and a third to -Engine instead of
+# being collected by -Paths.
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Paths,
@@ -35,7 +38,8 @@ current directory is always mounted and used as the working directory. Each
 additional PATH is mounted read-write under /workspace, named after the last
 component of that path.
 
-Anything given to -ClaudeArgs is passed on to claude itself.
+Anything given to -ClaudeArgs is passed on to claude itself; several of them
+have to be one comma-separated list, e.g. -ClaudeArgs --model,opus.
 
 Networking
   The claude container runs on an internal container network with no route off
@@ -98,7 +102,7 @@ if (-not $Bridge) { $Bridge = "claude-egress" }
 $usedNames = [System.Collections.Generic.List[string]]::new()
 function New-MountName([string]$Path) {
     $base = Split-Path -Leaf $Path.TrimEnd('/', '\')
-    if ([string]::IsNullOrEmpty($base)) { $base = 'root' }
+    if ([string]::IsNullOrEmpty($base) -or $base -match '^[A-Za-z]:$') { $base = 'root' }
     $name = $base
     $i = 2
     while ($usedNames.Contains($name)) {
@@ -314,7 +318,7 @@ foreach ($name in @('NO_PROXY', 'no_proxy')) {
     $runArgs += @('-e', "${name}=${noProxyVal}")
 }
 
-$pwdPath = (Get-Location).Path
+$pwdPath = (Get-Location).ProviderPath
 $workdirName = New-MountName $pwdPath
 $runArgs += @('-v', "${pwdPath}:/workspace/${workdirName}")
 Write-Host "mount $pwdPath -> /workspace/$workdirName (workdir)"
@@ -325,7 +329,7 @@ foreach ($p in $Paths) {
         Write-Error "no such path: $p"
         exit 1
     }
-    $abs = $resolved.Path
+    $abs = $resolved.ProviderPath
     $name = New-MountName $abs
     $runArgs += @('-v', "${abs}:/workspace/${name}")
     Write-Host "mount $abs -> /workspace/$name"

@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 
-[CmdletBinding()]
+# Without PositionalBinding off, -Engine and the parameters after it are
+# positional too and swallow arguments meant for -DockerArgs.
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Position = 0)]
     [ValidateSet('claude', 'proxy', 'all')]
