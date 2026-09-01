@@ -67,8 +67,10 @@ changed since it was created (tracked via `claude.*` labels) — wait until tiny
 actually answers, then run the dev container with the mounts, proxy variables and
 terminal settings in place.
 
-**The build scripts** (`build.sh` / `build.ps1`) build the two images. The `.sh` and
-`.ps1` variants are functionally equivalent; use whichever matches your shell.
+**The build scripts** (`build.sh` / `build.ps1`) build the two images. With `--update`
+(`-Update` in PowerShell) they pull the latest base images and rebuild from scratch,
+ignoring the layer cache. The `.sh` and `.ps1` variants are functionally equivalent; use
+whichever matches your shell.
 
 ## Getting started
 
@@ -76,13 +78,14 @@ Build the images once:
 
 ```sh
 ./build.sh                 # both images
-./build.sh claude          # just the dev image
-./build.sh proxy -- --no-cache
+./build.sh [claude|proxy]  # just the dev or proxy image
+./build.sh --update        # pull new base images and rebuild from scratch)
 ```
 
 ```powershell
 ./build.ps1
-./build.ps1 proxy -DockerArgs --no-cache
+./build.sh [claude|proxy]
+./build.ps1 -Update
 ```
 
 Then start Claude from whatever project you want to work on:
@@ -120,6 +123,11 @@ Use podman instead of docker:
 
 ```sh
 CONTAINER_ENGINE=podman ./start.sh
+```
+
+```powershell
+$env:CONTAINER_ENGINE="podman"
+./start.ps1
 ```
 
 Under rootless podman the scripts default to `--userns keep-id` so the bind-mounted
@@ -189,3 +197,5 @@ them as named parameters.
   defense against a kernel exploit.
 - Anything Claude writes under a mounted path is written to the real directory on the
   host. Mount only what you want it to be able to change.
+- DNS resolution on WSL is a bit wacky, when the host machine is suspended/hibernated. Close all instances
+  run `wsl --shutdown` and start again, when the proxy cannot communicate to the outside world.

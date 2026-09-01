@@ -5,10 +5,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat >&2 <<'USAGE'
-usage: build.sh [TARGET...] [-- DOCKER_BUILD_ARG...]
+usage: build.sh [--update] [TARGET...] [-- DOCKER_BUILD_ARG...]
 
 Builds the container images. TARGET is claude or proxy; without one both are
 built.
+
+With --update the latest base images are pulled and the images are rebuilt from
+scratch.
 
 Anything after -- is passed on to the engine's build command.
 
@@ -42,8 +45,9 @@ targets=()
 build_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --) shift; build_args=("$@"); break ;;
+        --) shift; build_args+=("$@"); break ;;
         -h|--help) usage; exit 0 ;;
+        --update) build_args+=(--pull --no-cache); shift ;;
         claude|proxy) targets+=("$1"); shift ;;
         *) printf 'build.sh: unknown target: %s\n' "$1" >&2; usage; exit 1 ;;
     esac

@@ -14,12 +14,14 @@ param(
     [string]$DotnetChannel = $(if ($env:DOTNET_CHANNEL) { $env:DOTNET_CHANNEL } else { '10.0' }),
     [string]$ProxyImage = $(if ($env:PROXY_IMAGE) { $env:PROXY_IMAGE } else { 'claude-proxy' }),
     [string]$ProxyTag = $(if ($env:PROXY_TAG) { $env:PROXY_TAG } else { 'latest' }),
+    [switch]$Update,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$DockerArgs
 )
 
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$updateArgs = if ($Update) { @('--pull', '--no-cache') } else { @() }
 
 function Build-ClaudeImage {
     if ($IsWindows -or $null -eq $IsWindows) {
@@ -40,6 +42,7 @@ function Build-ClaudeImage {
         '--build-arg', "DOTNET_CHANNEL=$DotnetChannel"
         '-t', "${Image}:${Tag}"
     )
+    $buildArgs += $updateArgs
     if ($DockerArgs) { $buildArgs += $DockerArgs }
     $buildArgs += (Join-Path $scriptDir 'claude')
 
@@ -50,6 +53,7 @@ function Build-ClaudeImage {
 
 function Build-ProxyImage {
     $buildArgs = @('build', '-t', "${ProxyImage}:${ProxyTag}")
+    $buildArgs += $updateArgs
     if ($DockerArgs) { $buildArgs += $DockerArgs }
     $buildArgs += (Join-Path $scriptDir 'proxy')
 
