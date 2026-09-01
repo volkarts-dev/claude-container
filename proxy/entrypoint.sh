@@ -1,8 +1,6 @@
 #!/bin/sh
 set -eu
 
-# The config is generated at start so the upstream can change without a rebuild;
-# /etc is read-only for nobody, so the copy lives in /tmp.
 CONF=/tmp/tinyproxy.conf
 cp /etc/tinyproxy/tinyproxy.conf "$CONF"
 

@@ -35,9 +35,9 @@ Environment
   CLAUDE_NO_PROXY  comma-separated hosts, domains (.corp.example) and networks
                    (10.0.0.0/8) the proxy reaches directly instead of through
                    the upstream; falls back to NO_PROXY
-  CLAUDE_NET       internal network name (default claude-egress)
+  CLAUDE_NET       internal network name (default claude-internal)
   CLAUDE_BRIDGE    outward-facing network the proxy reaches the outside on,
-                   created when missing (default <CLAUDE_NET>-out); it has to
+                   created when missing (default claude-egress); it has to
                    carry DNS, which the engines' predefined bridge networks do
                    not
   CLAUDE_USERNS    --userns for the claude container; unset picks keep-id under
@@ -64,8 +64,8 @@ IMAGE="${CLAUDE_IMAGE:-claude-dev}"
 TAG="${CLAUDE_TAG:-latest}"
 CONTAINER_USER="${CONTAINER_USER:-dev}"
 CONTAINER_HOME="/home/${CONTAINER_USER}"
-NET_NAME="${CLAUDE_NET:-claude-egress}"
-BRIDGE_NET="${CLAUDE_BRIDGE:-${NET_NAME}-out}"
+NET_NAME="${CLAUDE_NET:-claude-internal}"
+BRIDGE_NET="${CLAUDE_BRIDGE:-claude-egress}"
 PROXY_IMAGE="${PROXY_IMAGE:-claude-proxy}"
 PROXY_TAG="${PROXY_TAG:-latest}"
 PROXY_NAME="${PROXY_CONTAINER:-claude-proxy}"
@@ -97,8 +97,7 @@ resolve_path() {
 }
 
 used_names=()
-# Sets MOUNT_NAME to an unused /workspace subdirectory name; must not run in a
-# subshell, since it records the name it hands out.
+
 assign_name() {
     local base="$1" candidate i=2
     [ "$base" = "/" ] && base="root"
@@ -116,7 +115,6 @@ assign_name() {
     used_names+=("$MOUNT_NAME")
 }
 
-# Splits a proxy URL into PROXY_CREDS (may be empty), PROXY_HOST and PROXY_PORT_N.
 parse_proxy() {
     local url="$1" scheme rest hostport
     scheme=""
@@ -150,8 +148,6 @@ parse_proxy() {
     [ -n "$PROXY_HOST" ]
 }
 
-# Sets UPSTREAM to the [creds@]host:port tinyproxy forwards to, empty for direct
-# egress, and HOST_GATEWAY when that host is the container host itself.
 resolve_upstream() {
     local url="${CLAUDE_PROXY:-${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}}"
     UPSTREAM=""
@@ -170,8 +166,6 @@ resolve_upstream() {
     UPSTREAM="${PROXY_CREDS:+${PROXY_CREDS}@}${PROXY_HOST}:${PROXY_PORT_N}"
 }
 
-# Creates the internal network if missing, and refuses a same-named one that
-# would let the claude container out on its own.
 ensure_network() {
     if "$ENGINE" network inspect "$NET_NAME" >/dev/null 2>&1; then
         if [ "$("$ENGINE" network inspect -f '{{.Internal}}' "$NET_NAME")" != "true" ]; then
@@ -184,10 +178,6 @@ ensure_network() {
     fi
 }
 
-# Creates the outward-facing network if missing. The engines' predefined bridge
-# networks serve no DNS of their own, and an internal network's resolver refuses
-# to forward, so a proxy on those two alone resolves nothing at all: neither its
-# upstream nor the sites it is asked to fetch.
 ensure_bridge_network() {
     if "$ENGINE" network inspect "$BRIDGE_NET" >/dev/null 2>&1; then
         if [ "$("$ENGINE" network inspect -f '{{.Internal}}' "$BRIDGE_NET")" = "true" ]; then
@@ -203,9 +193,6 @@ ensure_bridge_network() {
     fi
 }
 
-# Blocks until tinyproxy answers on its own port. A container whose entrypoint
-# fails still starts cleanly, and the restart policy then hides it in a crash
-# loop, so nothing may rely on the proxy before it has served a request.
 wait_proxy() {
     local i
     for i in $(seq 20); do
@@ -218,8 +205,6 @@ wait_proxy() {
     exit 1
 }
 
-# Starts the egress proxy, recreating it when its upstream, the hosts kept off
-# that upstream or a network changed.
 ensure_proxy() {
     local args=() described current
     current="$("$ENGINE" inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.noupstream"}}|{{index .Config.Labels "claude.network"}}|{{index .Config.Labels "claude.bridge"}}' "$PROXY_NAME" 2>/dev/null || true)"
@@ -278,9 +263,6 @@ if ! "$ENGINE" image inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Everything Claude Code persists lives in one directory mount; CLAUDE_CONFIG_DIR
-# keeps .claude.json inside it instead of at $HOME, where an atomic rewrite would
-# break a single-file bind mount.
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "${CONFIG_DIR}"
 if [ ! -f "${CONFIG_DIR}/.claude.json" ] && [ -f "$HOME/.claude.json" ]; then
@@ -344,7 +326,7 @@ done
 args+=(-w "/workspace/${workdir_name}")
 
 # The terminal type and COLORTERM decide what the programs inside are willing to
-# emit; without them TERM falls back to plain xterm and 24-bit colour is dropped.
+# emit; without them TERM falls back to plain xterm and 24-bit color is dropped.
 # The image carries ncurses-term, so exotic entries like xterm-kitty resolve.
 if [ -t 0 ]; then
     args+=(-it)

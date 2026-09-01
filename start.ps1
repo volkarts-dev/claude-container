@@ -1,33 +1,5 @@
 #!/usr/bin/env pwsh
-<#
-.SYNOPSIS
-Ensures the egress proxy is running, then starts claude in a container.
 
-.DESCRIPTION
-The current directory is always mounted and used as the working directory. Each
-additional path given is mounted read-write under /workspace, named after the
-last component of that path.
-
-The claude container runs on an internal container network with no route off the
-host. Its only way out is the tinyproxy container, which sits on that network as
-http://proxy:3128 and on a second, outward-facing network named by -Bridge (or
-CLAUDE_BRIDGE) and created when missing. That proxy goes out over the host
-connection, or forwards to the corporate proxy named by -Proxy (or CLAUDE_PROXY /
-HTTPS_PROXY / HTTP_PROXY), except for the hosts, domains (.corp.example) and
-networks (10.0.0.0/8) named by -NoProxy (or CLAUDE_NO_PROXY / NO_PROXY), which it
-reaches directly. A proxy container left over from an earlier start is reused,
-and recreated when its upstream, that list or either network differs from the one
-in the current environment.
-
-The container frontend is docker or podman, chosen with -Engine or
-CONTAINER_ENGINE.
-
-The proxy image is built on demand; the dev image has to be built beforehand
-with ./build.ps1.
-
-.EXAMPLE
-./start.ps1 ..\other-repo C:\data -ClaudeArgs --resume
-#>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
@@ -40,7 +12,7 @@ param(
     [string]$ContainerUser = $(if ($env:CONTAINER_USER) { $env:CONTAINER_USER } else { 'dev' }),
     [string]$Proxy = $($env:CLAUDE_PROXY, $env:HTTPS_PROXY, $env:HTTP_PROXY | Where-Object { $_ } | Select-Object -First 1),
     [string]$NoProxy = $($env:CLAUDE_NO_PROXY, $env:NO_PROXY | Where-Object { $_ } | Select-Object -First 1),
-    [string]$Network = $(if ($env:CLAUDE_NET) { $env:CLAUDE_NET } else { 'claude-egress' }),
+    [string]$Network = $(if ($env:CLAUDE_NET) { $env:CLAUDE_NET } else { 'claude-internal' }),
     [string]$Bridge = $env:CLAUDE_BRIDGE,
     [string]$UserNs = $env:CLAUDE_USERNS,
     [string]$ProxyImage = $(if ($env:PROXY_IMAGE) { $env:PROXY_IMAGE } else { 'claude-proxy' }),
@@ -48,10 +20,72 @@ param(
     [string]$ProxyName = $(if ($env:PROXY_CONTAINER) { $env:PROXY_CONTAINER } else { 'claude-proxy' }),
     [string]$ProxyPublish = $env:PROXY_PORT,
     [string]$ProxyBind = $(if ($env:PROXY_BIND) { $env:PROXY_BIND } else { '127.0.0.1' }),
-    [switch]$NoTty
+    [switch]$NoTty,
+    [switch]$Help
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Show-Usage {
+    Write-Host @'
+usage: start.ps1 [PATH...] [-ClaudeArgs CLAUDE_ARG...]
+
+Ensures the egress proxy is running, then starts claude in a container. The
+current directory is always mounted and used as the working directory. Each
+additional PATH is mounted read-write under /workspace, named after the last
+component of that path.
+
+Anything given to -ClaudeArgs is passed on to claude itself.
+
+Networking
+  The claude container runs on an internal container network with no route off
+  the host. Its only way out is the tinyproxy container, which sits on that
+  network as http://proxy:3128 and on a second, outward-facing network. That
+  proxy goes out over the host connection, or forwards to the corporate proxy
+  named by -Proxy, except for the hosts named by -NoProxy. A proxy container
+  left over from an earlier start is reused, and recreated when its upstream,
+  that list or either network differs from the one in the current environment.
+
+  The proxy image is built on demand; the dev image has to be built beforehand
+  with ./build.ps1.
+
+Parameters
+  -Engine          container frontend, docker or podman (default docker,
+                   env CONTAINER_ENGINE)
+  -Proxy           corporate proxy the egress forwards to, e.g.
+                   http://proxy.corp:3128 or http://user:pass@host:port; falls
+                   back to CLAUDE_PROXY/HTTPS_PROXY/HTTP_PROXY, unset means
+                   direct
+  -NoProxy         comma-separated hosts, domains (.corp.example) and networks
+                   (10.0.0.0/8) the proxy reaches directly instead of through
+                   the upstream; falls back to CLAUDE_NO_PROXY/NO_PROXY
+  -Network         internal network name (default claude-internal,
+                   env CLAUDE_NET)
+  -Bridge          outward-facing network the proxy reaches the outside on,
+                   created when missing (default claude-egress,
+                   env CLAUDE_BRIDGE); it has to carry DNS, which the engines'
+                   predefined bridge networks do not
+  -UserNs          --userns for the claude container; unset picks keep-id under
+                   rootless podman and nothing otherwise (env CLAUDE_USERNS)
+  -Image           dev image name (default claude-dev, env CLAUDE_IMAGE)
+  -Tag             dev image tag (default latest, env CLAUDE_TAG)
+  -ContainerUser   user inside the dev image (default dev, env CONTAINER_USER)
+  -ProxyImage      proxy image name (default claude-proxy, env PROXY_IMAGE)
+  -ProxyTag        proxy image tag (default latest, env PROXY_TAG)
+  -ProxyName       proxy container name (default claude-proxy,
+                   env PROXY_CONTAINER)
+  -ProxyPublish    host port to publish the proxy on; unset publishes nothing
+                   (env PROXY_PORT)
+  -ProxyBind       host address for that port (default 127.0.0.1,
+                   env PROXY_BIND)
+  -NoTty           do not allocate a terminal for the claude container
+'@
+}
+
+if ($Help) {
+    Show-Usage
+    exit 0
+}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $containerHome = "/home/$ContainerUser"
@@ -59,7 +93,7 @@ $homeDir = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
 $proxyListen = 3128
 
 $hostInternal = if ($Engine -eq 'podman') { 'host.containers.internal' } else { 'host.docker.internal' }
-if (-not $Bridge) { $Bridge = "$Network-out" }
+if (-not $Bridge) { $Bridge = "claude-egress" }
 
 $usedNames = [System.Collections.Generic.List[string]]::new()
 function New-MountName([string]$Path) {
@@ -75,7 +109,6 @@ function New-MountName([string]$Path) {
     return $name
 }
 
-# Splits a proxy URL into its credentials (may be empty), host and port.
 function Split-ProxyUrl([string]$Url) {
     $scheme = ''
     $rest = $Url
@@ -120,8 +153,6 @@ function Split-ProxyUrl([string]$Url) {
     return [pscustomobject]@{ Creds = $creds; Host = $proxyHost; Port = $port }
 }
 
-# The [creds@]host:port tinyproxy forwards to, empty for direct egress, plus
-# whether that host is the container host itself.
 function Resolve-Upstream {
     if (-not $Proxy) {
         return [pscustomobject]@{ Spec = ''; HostGateway = $false }
@@ -137,9 +168,7 @@ function Resolve-Upstream {
     return [pscustomobject]@{ Spec = "${credPart}${target}:$($parsed.Port)"; HostGateway = $hostGateway }
 }
 
-# Creates the internal network if missing, and refuses a same-named one that
-# would let the claude container out on its own.
-function Initialize-EgressNetwork {
+function Initialize-InternalNetwork {
     $internal = & $Engine network inspect -f '{{.Internal}}' $Network 2>$null
     if ($LASTEXITCODE -eq 0) {
         if ($internal.Trim() -ne 'true') {
@@ -152,10 +181,6 @@ function Initialize-EgressNetwork {
     Write-Host "created internal network $Network"
 }
 
-# Creates the outward-facing network if missing. The engines' predefined bridge
-# networks serve no DNS of their own, and an internal network's resolver refuses
-# to forward, so a proxy on those two alone resolves nothing at all: neither its
-# upstream nor the sites it is asked to fetch.
 function Initialize-BridgeNetwork {
     $internal = & $Engine network inspect -f '{{.Internal}}' $Bridge 2>$null
     if ($LASTEXITCODE -eq 0) {
@@ -175,9 +200,6 @@ function Initialize-BridgeNetwork {
     Write-Host "created outward network $Bridge"
 }
 
-# Blocks until tinyproxy answers on its own port. A container whose entrypoint
-# fails still starts cleanly, and the restart policy then hides it in a crash
-# loop, so nothing may rely on the proxy before it has served a request.
 function Wait-Proxy {
     for ($i = 0; $i -lt 20; $i++) {
         & $Engine exec $ProxyName sh -c "http_proxy=http://127.0.0.1:${proxyListen} wget -q -O /dev/null http://tinyproxy.stats/" 2>$null | Out-Null
@@ -188,9 +210,6 @@ function Wait-Proxy {
     exit 1
 }
 
-# Starts the egress proxy, recreating it when its upstream, the hosts kept off
-# that upstream or a network changed. tinyproxy reads both once at start, so a
-# change only reaches it through a container created anew with it.
 function Initialize-Proxy($Upstream) {
     $labels = & $Engine inspect -f '{{index .Config.Labels "claude.upstream"}}|{{index .Config.Labels "claude.noupstream"}}|{{index .Config.Labels "claude.network"}}|{{index .Config.Labels "claude.bridge"}}' $ProxyName 2>$null
     $current = if ($LASTEXITCODE -eq 0 -and $labels) { $labels.Trim() } else { '' }
@@ -249,9 +268,6 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# Everything Claude Code persists lives in one directory mount; CLAUDE_CONFIG_DIR
-# keeps .claude.json inside it instead of at $HOME, where an atomic rewrite would
-# break a single-file bind mount.
 $configDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $homeDir '.claude' }
 
 if (-not (Test-Path -LiteralPath $configDir)) {
@@ -265,7 +281,7 @@ if ((-not (Test-Path -LiteralPath $containedConfigFile)) -and (Test-Path -Litera
 }
 
 $upstream = Resolve-Upstream
-Initialize-EgressNetwork
+Initialize-InternalNetwork
 Initialize-BridgeNetwork
 Initialize-Proxy $upstream
 

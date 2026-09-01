@@ -11,21 +11,21 @@ straight out over the host connection.
 Two containers on two networks:
 
 ```
-                    internal network                 outward network
-                    (claude-egress)                  (claude-egress-out)
-                    no route off host
+                              internal network                             outward network
+                              (claude-internal)                            (claude-egress)
+                              no route off host
   ┌───────────────────────┐                     ┌──────────────────────┐
-  │  claude-dev           │                     │                      │
-  │  ─────────────        │   http://proxy:3128 │   claude-proxy       │
-  │  claude code          ├────────────────────►│   (tinyproxy)        ├──► upstream
+  │  claude-dev           │                     │   claude-proxy       │
+  │  ───────────────────  │   http://proxy:3128 │   ─────────────────  │
+  │  claude code          ├────────────────────►│   tinyproxy          ├──► upstream
   │  node / .NET / git    │                     │                      │    proxy or
-  │  ripgrep, fd, jq, …   │                     │   Upstream none      │    direct
-  │                       │                     │   for NO_PROXY hosts │    egress
+  │  ripgrep, fd, jq, …   │                     │                      │    direct
+  │                       │                     │                      │    egress
   │  --cap-drop NET_ADMIN │                     │   --cap-drop ALL     │
   │  --cap-drop NET_RAW   │                     │   no-new-privileges  │
-  │  no-new-privileges    │                     │   restart unless-    │
-  │  no setuid, no su     │                     │   stopped (reused)   │
-  │  --rm (throwaway)     │                     │                      │
+  │  no-new-privileges    │                     │                      │
+  │  no setuid, no su     │                     │                      │
+  │  [throwaway]          │                     │   [reused]           │
   └───────┬───────────────┘                     └──────────────────────┘
           │ bind mounts
           │
@@ -57,8 +57,8 @@ private RFC1918/ULA ranges, and `CONNECT` is limited to port 443.
 **The two networks** exist because of DNS. The dev container sits only on an `--internal`
 network, which has no route off the host — the proxy is its single exit. The proxy also
 joins a normal user-defined bridge network, because the engines' *predefined* bridge
-serves no DNS and an internal network's resolver refuses to forward, which would leave
-the proxy unable to resolve either its upstream or the sites it is asked to fetch.
+networks serve no DNS and an internal network's resolver refuses to forward, which would 
+leave the proxy unable to resolve either its upstream or the sites it is asked to fetch.
 
 **The start scripts** (`start.sh` / `start.ps1`) wire all of this up on every launch:
 they resolve the upstream proxy, create the networks if missing, reuse a running proxy
@@ -145,14 +145,11 @@ cleartext — an `https://` proxy URL will not work, and the scripts warn about 
   kept *inside* that directory — mounting it as a single file would break on Claude
   Code's atomic rewrite — and is seeded from `~/.claude.json` on first run.
 - `~/.gitconfig` read-only, if present.
-- `TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, so colours and key
+- `TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, so colous and key
   handling match your terminal. `start.ps1` defaults to `xterm-256color`/`truecolor`
   since Windows consoles set neither.
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` — only when set on the host.
-
-No SSH agent socket and no GitHub token are passed in, so nothing inside can authenticate
-to a remote on your behalf.
 
 Everything else is left outside. The dev container itself is `--rm`: nothing written
 outside the mounts survives the session.
@@ -171,8 +168,8 @@ them as named parameters.
 | `DOTNET_CHANNEL` | `10.0` | .NET channel (build only) |
 | `CLAUDE_PROXY` | `HTTPS_PROXY`/`HTTP_PROXY` | Upstream proxy the egress forwards to; unset means direct |
 | `CLAUDE_NO_PROXY` | `NO_PROXY` | Hosts, domains (`.corp.example`) and networks (`10.0.0.0/8`) reached without the upstream |
-| `CLAUDE_NET` | `claude-egress` | Internal network name |
-| `CLAUDE_BRIDGE` | `<CLAUDE_NET>-out` | Outward-facing network; must carry DNS |
+| `CLAUDE_NET` | `claude-internal` | Internal network name |
+| `CLAUDE_BRIDGE` | `claude-egress` | Outward-facing network; must carry DNS |
 | `CLAUDE_USERNS` | auto | `--userns` for the dev container |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Host directory mounted as the Claude config |
 | `PROXY_IMAGE` / `PROXY_TAG` | `claude-proxy` / `latest` | Proxy image name and tag |
@@ -184,11 +181,11 @@ them as named parameters.
 
 - The proxy container outlives the session on purpose (`--restart unless-stopped`), so
   repeated starts are fast. Remove it with `docker rm -f claude-proxy` if you want a
-  clean slate; the next start rebuilds it.
+  clean state; the next start rebuilds it.
 - `start.sh` refuses a pre-existing `CLAUDE_NET` that is not `--internal`, and a
   `CLAUDE_BRIDGE` that is — either would break the containment or the egress.
 - The sandbox constrains *network* and *filesystem* reach. The dev user cannot escalate
   to root inside the container, but the container is still a container: it is not a
-  defence against a kernel exploit.
+  defense against a kernel exploit.
 - Anything Claude writes under a mounted path is written to the real directory on the
   host. Mount only what you want it to be able to change.

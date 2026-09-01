@@ -1,17 +1,5 @@
 #!/usr/bin/env pwsh
-<#
-.SYNOPSIS
-Builds the container images.
 
-.DESCRIPTION
-Target is claude or proxy; without one both are built.
-
-.EXAMPLE
-./build.ps1
-
-.EXAMPLE
-./build.ps1 proxy -DockerArgs --no-cache
-#>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
