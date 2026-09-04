@@ -166,6 +166,17 @@ resolve_upstream() {
     UPSTREAM="${PROXY_CREDS:+${PROXY_CREDS}@}${PROXY_HOST}:${PROXY_PORT_N}"
 }
 
+ensure_engine() {
+    if ! command -v "$ENGINE" >/dev/null 2>&1; then
+        printf 'start.sh: %s is not installed or not on PATH\n' "$ENGINE" >&2
+        exit 1
+    fi
+    if ! "$ENGINE" info >/dev/null 2>&1; then
+        printf 'start.sh: cannot talk to the %s engine; is it running?\n' "$ENGINE" >&2
+        exit 1
+    fi
+}
+
 ensure_network() {
     if "$ENGINE" network inspect "$NET_NAME" >/dev/null 2>&1; then
         if [ "$("$ENGINE" network inspect -f '{{.Internal}}' "$NET_NAME")" != "true" ]; then
@@ -257,6 +268,8 @@ ensure_proxy() {
     described="${UPSTREAM:-direct}"
     printf 'proxy %s serving %s -> %s\n' "$PROXY_NAME" "$NET_NAME" "${described##*@}" >&2
 }
+
+ensure_engine
 
 if ! "$ENGINE" image inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
     printf 'start.sh: image %s:%s is missing; run %s/build.sh\n' "$IMAGE" "$TAG" "$SCRIPT_DIR" >&2

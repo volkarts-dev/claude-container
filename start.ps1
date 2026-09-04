@@ -172,6 +172,18 @@ function Resolve-Upstream {
     return [pscustomobject]@{ Spec = "${credPart}${target}:$($parsed.Port)"; HostGateway = $hostGateway }
 }
 
+function Assert-Engine {
+    if (-not (Get-Command $Engine -ErrorAction SilentlyContinue)) {
+        Write-Error "$Engine is not installed or not on PATH"
+        exit 1
+    }
+    & $Engine info 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "cannot talk to the $Engine engine; is it running?"
+        exit 1
+    }
+}
+
 function Initialize-InternalNetwork {
     $internal = & $Engine network inspect -f '{{.Internal}}' $Network 2>$null
     if ($LASTEXITCODE -eq 0) {
@@ -265,6 +277,8 @@ function Initialize-Proxy($Upstream) {
     $described = if ($Upstream.Spec) { $Upstream.Spec -replace '^.*@', '' } else { 'direct' }
     Write-Host "proxy $ProxyName serving $Network -> $described"
 }
+
+Assert-Engine
 
 & $Engine image inspect "${Image}:${Tag}" 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
