@@ -78,6 +78,31 @@ RUN set -eux; \
     ln -s "${DOTNET_ROOT}/dotnet" /usr/local/bin/dotnet; \
     dotnet --info
 
+# PowerShell from the official GitHub release tarball, checksum verified
+ENV PWSH_ROOT=/opt/microsoft/powershell/7 \
+    POWERSHELL_TELEMETRY_OPTOUT=1 \
+    POWERSHELL_UPDATECHECK=Off
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) PWSH_ARCH=x64 ;; \
+        arm64) PWSH_ARCH=arm64 ;; \
+        armhf) PWSH_ARCH=arm32 ;; \
+        *) echo "unsupported architecture" >&2; exit 1 ;; \
+    esac; \
+    TAG="$(curl -fsSL https://api.github.com/repos/PowerShell/PowerShell/releases/latest | jq -r .tag_name)"; \
+    VERSION="${TAG#v}"; \
+    TARBALL="powershell-${VERSION}-linux-${PWSH_ARCH}.tar.gz"; \
+    BASE="https://github.com/PowerShell/PowerShell/releases/download/${TAG}"; \
+    curl -fsSLO "$BASE/$TARBALL"; \
+    curl -fsSL "$BASE/hashes.sha256" | iconv -f UTF-16 -t UTF-8 | tr -d '\r' \
+        | grep " \*$TARBALL\$" | sha256sum -c -; \
+    mkdir -p "${PWSH_ROOT}"; \
+    tar -xzf "$TARBALL" -C "${PWSH_ROOT}" --no-same-owner; \
+    rm "$TARBALL"; \
+    chmod +x "${PWSH_ROOT}/pwsh"; \
+    ln -s "${PWSH_ROOT}/pwsh" /usr/local/bin/pwsh; \
+    pwsh --version
+
 RUN if getent group "${USER_GID}" >/dev/null; then \
         groupmod -n "${USERNAME}" "$(getent group "${USER_GID}" | cut -d: -f1)"; \
     else \
@@ -89,6 +114,9 @@ RUN if getent group "${USER_GID}" >/dev/null; then \
         useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/bash "${USERNAME}"; \
     fi \
     && mkdir -p /workspace && chown "${USER_UID}:${USER_GID}" /workspace
+
+# more deps for downloaded dev-tools
+RUN npx playwright install-deps
 
 # No path to root from inside: every setuid/setgid bit is cleared and the
 # switch-user tools are removed, so the container user stays the container user.

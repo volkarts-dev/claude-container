@@ -19,7 +19,7 @@ Two containers on two networks:
   │  ───────────────────  │   http://proxy:3128 │   ─────────────────  │
   │  claude code          ├────────────────────►│   tinyproxy          ├──► upstream
   │  node / .NET / git    │                     │                      │    proxy or
-  │  ripgrep, fd, jq, …   │                     │                      │    direct
+  │  pwsh, ripgrep, jq, … │                     │                      │    direct
   │                       │                     │                      │    egress
   │  --cap-drop NET_ADMIN │                     │   --cap-drop ALL     │
   │  --cap-drop NET_RAW   │                     │   no-new-privileges  │
@@ -35,8 +35,9 @@ Two containers on two networks:
 ```
 
 **The dev container** (`claude/Dockerfile`) is Debian 13 slim with Node.js (from the
-official nodejs.org tarball, checksum verified), the .NET SDK, `git`, `git-lfs`,
-`ripgrep`, `fd-find`, `jq`, build tooling, Python 3 and the usual shell utilities. The
+official nodejs.org tarball, checksum verified), the .NET SDK, PowerShell (from the
+official GitHub release tarball, checksum verified), `git`, `git-lfs`, `ripgrep`,
+`fd-find`, `jq`, build and test tooling, Python 3 and the usual shell utilities. The
 Claude Code CLI is installed globally with npm. It runs as an unprivileged user (`dev`
 by default) created with the *host's* uid/gid, so files written into the mounted
 workspace keep the right ownership. `tini` is the entrypoint so signals and zombie
