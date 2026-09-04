@@ -40,6 +40,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-venv \
         python3-pip \
+        librsvg2-bin \
+        imagemagick \
+        fonts-dejavu \
+        fonts-noto-core \
+        fonts-inter \
+        fonts-jetbrains-mono \
         libssl3 \
         libicu-dev \
         libkrb5-3 \
@@ -123,7 +129,9 @@ RUN npx playwright install-deps
 RUN find / -xdev -perm /6000 -type f -exec chmod ug-s {} + \
     && rm -f /bin/su /usr/bin/newgrp /usr/bin/chsh /usr/bin/chfn /usr/bin/gpasswd
 
+# and now the user stuff
 USER ${USERNAME}
+
 ENV HOME=/home/${USERNAME} \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.npm-global \
     NODE_OPTIONS=--max-old-space-size=4096
@@ -134,7 +142,12 @@ RUN mkdir -p "${NPM_CONFIG_PREFIX}" "${HOME}/.claude" \
     && npm cache clean --force \
     && claude --version
 
-WORKDIR /workspace
+RUN npm install -g playwright \
+    && playwright install chromium \
+    && npm cache clean --force \
+    && playwright --version
 
+# default startup values
+WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash"]
