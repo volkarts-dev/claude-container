@@ -147,6 +147,10 @@ RUN npm install -g playwright \
     && npm cache clean --force \
     && playwright --version
 
+# disabled updates (they would be gone on container restart anyway)
+ENV ENV DISABLE_AUTOUPDATER=1 \
+    DISABLE_UPDATES=1
+
 # default startup values
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--"]
