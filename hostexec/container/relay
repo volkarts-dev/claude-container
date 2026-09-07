@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+import os
+import socket
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import protocol  # noqa: E402
+
+DEFAULT_SOCKET = "/tmp/hostexec/sock"
+PING_INTERVAL = 5.0
+CHUNK = 65536
+
+
+def log(message):
+    print(f"relay: {message}", file=sys.stderr, flush=True)
+
+
+class Relay:
+    def __init__(self, path):
+        self.path = path
+        self.out = sys.stdout.buffer
+        self.out_lock = threading.Lock()
+        self.sessions = {}
+        self.sessions_lock = threading.Lock()
+        self.next_ident = 1
+
+    def send(self, kind, ident, payload=b""):
+        try:
+            with self.out_lock:
+                self.out.write(protocol.pack_link(kind, ident, payload))
+                self.out.flush()
+        except OSError:
+            log("host link is gone")
+            os._exit(1)
+
+    def listen(self):
+        directory = os.path.dirname(self.path)
+        os.makedirs(directory, 0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(self.path)
+        os.chmod(self.path, 0o600)
+        listener.listen(8)
+        return listener
+
+    def serve(self):
+        listener = self.listen()
+        threading.Thread(target=self.accept_loop, args=(listener,), daemon=True).start()
+        threading.Thread(target=self.ping_loop, daemon=True).start()
+        log(f"listening on {self.path}")
+        self.pump_stdin()
+        log("host closed the link, exiting")
+        with self.sessions_lock:
+            connections = list(self.sessions.values())
+            self.sessions.clear()
+        for conn in connections:
+            self.drop(conn)
+        listener.close()
+        os._exit(0)
+
+    def accept_loop(self, listener):
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.open, args=(conn,), daemon=True).start()
+
+    def open(self, conn):
+        reader = conn.makefile("rb")
+        try:
+            line = reader.readline()
+            if not line or len(line) > protocol.HEADER_LIMIT:
+                return
+            with self.sessions_lock:
+                ident = self.next_ident
+                self.next_ident += 1
+                self.sessions[ident] = conn
+            self.send(protocol.NEW, ident, line)
+            while True:
+                try:
+                    chunk = reader.read1(CHUNK)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    break
+                self.send(protocol.DATA, ident, chunk)
+            with self.sessions_lock:
+                open_session = self.sessions.pop(ident, None) is not None
+            if open_session:
+                self.send(protocol.CLOSE, ident)
+        finally:
+            reader.close()
+            self.drop(conn)
+
+    def drop(self, conn):
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        conn.close()
+
+    def ping_loop(self):
+        while True:
+            time.sleep(PING_INTERVAL)
+            with self.sessions_lock:
+                idle = not self.sessions
+            if idle:
+                self.send(protocol.PING, 0)
+
+    def pump_stdin(self):
+        stream = sys.stdin.buffer
+        while True:
+            try:
+                frame = protocol.read_link(stream)
+            except protocol.ProtocolError as error:
+                log(f"bad frame from the host: {error}")
+                return
+            if frame is None:
+                return
+            kind, ident, payload = frame
+            if kind in (protocol.ACCEPT, protocol.DATA):
+                with self.sessions_lock:
+                    conn = self.sessions.get(ident)
+                if conn is not None:
+                    try:
+                        conn.sendall(payload)
+                    except OSError:
+                        pass
+            elif kind == protocol.CLOSE:
+                with self.sessions_lock:
+                    conn = self.sessions.pop(ident, None)
+                if conn is not None:
+                    self.drop(conn)
+            elif kind != protocol.PING:
+                log(f"unknown link frame {kind!r}")
+
+
+def main():
+    path = os.environ.get("CLAUDE_HOST_EXEC") or DEFAULT_SOCKET
+    Relay(path).serve()
+
+
+if __name__ == "__main__":
+    main()

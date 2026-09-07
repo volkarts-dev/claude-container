@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -11,8 +12,15 @@ import tempfile
 import time
 from pathlib import Path
 
+from hostexec import detect as hostexec_detect
+from hostexec import relaylink
+from hostexec import server as hostexec_server
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROXY_LISTEN = 3128
+HOSTEXEC_MOUNT = "/opt/hostexec"
+HOSTEXEC_SOCKET = "/tmp/hostexec/sock"
+HOSTEXEC_DIR = SCRIPT_DIR / "hostexec" / "container"
 HOST_ALIASES = {
     "localhost", "127.0.0.1", "::1", "[::1]",
     "host.docker.internal", "host.containers.internal",
@@ -28,7 +36,7 @@ current directory is always mounted and used as the working directory. Each
 additional PATH is mounted read-write under /workspace, named after the last
 component of that path.
 
-Anything after -- is passed on to claude itself.
+Anything after -- is passed on to claude itself, or to bash with -s.
 
 Networking
   The claude container runs on an internal container network with no route off
@@ -41,7 +49,19 @@ Networking
   environment.
 
   The proxy image is built on demand; the dev image has to be built beforehand
-  with build.py."""
+  with build.py.
+
+Host exec
+  With --host-exec (or CLAUDE_HOST_EXEC=1) the working directory is scanned for
+  a known build system (package.json, a .NET solution or project, a Makefile
+  with build/test targets, pyproject.toml) and a small server in this process
+  offers the two verbs build and test to the container. Inside, `hostrun build`
+  and `hostrun test` run the host's toolchain in the working directory and
+  relay output and exit status; a skill tells claude about them. The host
+  reaches the container through a single `exec` session, so no port, mount or
+  network change is involved. Note that this runs whatever the repo's build
+  definition says with your rights on the host, and claude can edit that
+  definition."""
 
 EPILOG = """\
 environment:
@@ -61,6 +81,9 @@ environment:
                    rootless podman and nothing otherwise
   CLAUDE_CONFIG_DIR host directory mounted as the Claude config
                    (default ~/.claude)
+  CLAUDE_HOST_EXEC 1 enables host exec, same as --host-exec
+  CLAUDE_HOST_MODULE force the host exec module (npm, dotnet, make, python)
+                   instead of detecting one
   CLAUDE_IMAGE     dev image name (default claude-dev)
   CLAUDE_TAG       dev image tag (default latest)
   CONTAINER_USER   user inside the dev image (default dev)
@@ -131,6 +154,8 @@ class Settings:
         self.host_gateway = False
         self.home = Path.home()
         self.config_dir = Path(env("CLAUDE_CONFIG_DIR", default=str(self.home / ".claude")))
+        self.host_exec = env("CLAUDE_HOST_EXEC").lower() in ("1", "true", "yes", "on")
+        self.container_name = ""
 
 
 def parse_args(argv):
@@ -140,13 +165,18 @@ def parse_args(argv):
         argv, claude_args = argv[:split], argv[split + 1:]
     parser = argparse.ArgumentParser(
         prog="start.py",
-        usage="%(prog)s [PATH...] [-- CLAUDE_ARG...]",
+        usage="%(prog)s [--host-exec] [-s] [PATH...] [-- CLAUDE_ARG...]",
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("paths", nargs="*", metavar="PATH")
-    return parser.parse_args(argv).paths, claude_args
+    parser.add_argument("--host-exec", action="store_true",
+                        help="let claude run the repo's build and test on the host")
+    parser.add_argument("-s", "--shell", action="store_true",
+                        help="run bash in the container instead of claude")
+    options = parser.parse_args(argv)
+    return options, claude_args
 
 
 class MountNames:
@@ -402,6 +432,47 @@ def run_args(s, paths):
     return args
 
 
+def prepare_host_exec(s):
+    cwd = Path.cwd().resolve()
+    try:
+        module = hostexec_detect.pick(cwd)
+    except LookupError as error:
+        die(str(error))
+    if module is None:
+        warn(f"host exec: no known build system in {cwd}, feature disabled")
+        return None
+    offered = module.describe(cwd)
+    if not offered:
+        warn(f"host exec: module {module.NAME} offers nothing in {cwd}, feature disabled")
+        return None
+    described = ", ".join(f"{verb}: {command}" for verb, command in sorted(offered.items()))
+    note(f"host exec: {module.NAME} ({described})")
+    s.container_name = f"claude-dev-{secrets.token_hex(3)}"
+    return hostexec_server.Server(module, cwd, s.config_dir / "hostexec.log")
+
+
+def host_exec_args(s):
+    return [
+        "--name", s.container_name,
+        "-e", f"CLAUDE_HOST_EXEC={HOSTEXEC_SOCKET}",
+        "-v", f"{HOSTEXEC_DIR}:{HOSTEXEC_MOUNT}:ro",
+    ]
+
+
+def container_running(s):
+    return query([s.engine, "inspect", "-f", "{{.State.Running}}", s.container_name]) == "true"
+
+
+def wait_container(s, proc):
+    for _ in range(120):
+        if container_running(s):
+            return True
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.25)
+    return False
+
+
 def exec_claude(cmd):
     if os.name != "nt":
         os.execvp(cmd[0], cmd)
@@ -409,9 +480,30 @@ def exec_claude(cmd):
     sys.exit(subprocess.call(cmd))
 
 
+def run_claude_with_host_exec(s, cmd, server):
+    signal.signal(signal.SIGINT, lambda *_: None)
+    server.start()
+    proc = subprocess.Popen(cmd)
+    link = None
+    try:
+        if wait_container(s, proc):
+            link = relaylink.Link(
+                relaylink.exec_command(s.engine, s.container_name, HOSTEXEC_MOUNT),
+                server, server.log, alive=lambda: container_running(s))
+            link.start()
+        elif proc.poll() is None:
+            warn(f"host exec: container {s.container_name} did not come up in time, feature disabled")
+        return proc.wait()
+    finally:
+        if link is not None:
+            link.stop()
+        server.stop()
+
+
 def main():
-    paths, claude_args = parse_args(sys.argv[1:])
+    options, claude_args = parse_args(sys.argv[1:])
     s = Settings()
+    s.host_exec = s.host_exec or options.host_exec
     ensure_engine(s)
     if not succeeds([s.engine, "image", "inspect", s.image]):
         die(f"image {s.image} is missing; run {SCRIPT_DIR / 'build.py'}")
@@ -420,8 +512,15 @@ def main():
     ensure_network(s)
     ensure_bridge_network(s)
     ensure_proxy(s)
-    args = run_args(s, paths)
-    exec_claude([s.engine, "run", *args, s.image, "claude", *claude_args])
+    args = run_args(s, options.paths)
+    program = "bash" if options.shell else "claude"
+    server = prepare_host_exec(s) if s.host_exec else None
+    if server is None:
+        exec_claude([s.engine, "run", *args, s.image, program, *claude_args])
+    args += host_exec_args(s)
+    if not options.shell:
+        claude_args = ["--plugin-dir", f"{HOSTEXEC_MOUNT}/plugin", *claude_args]
+    sys.exit(run_claude_with_host_exec(s, [s.engine, "run", *args, s.image, program, *claude_args], server))
 
 
 if __name__ == "__main__":

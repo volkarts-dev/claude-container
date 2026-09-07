@@ -5,3 +5,5 @@
 *.ps1 text eol=crlf
 Dockerfile text eol=lf
 proxy/tinyproxy.conf text eol=lf
+hostexec/container/hostrun text eol=lf
+hostexec/container/relay text eol=lf

@@ -135,7 +135,7 @@ USER ${USERNAME}
 ENV HOME=/home/${USERNAME} \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.npm-global \
     NODE_OPTIONS=--max-old-space-size=4096
-ENV PATH=${HOME}/.npm-global/bin:${HOME}/.dotnet/tools:${PATH}
+ENV PATH=${HOME}/.npm-global/bin:${HOME}/.dotnet/tools:${PATH}:/opt/hostexec
 
 RUN mkdir -p "${NPM_CONFIG_PREFIX}" "${HOME}/.claude" \
     && npm install -g @anthropic-ai/claude-code \
@@ -148,7 +148,7 @@ RUN npm install -g playwright \
     && playwright --version
 
 # disabled updates (they would be gone on container restart anyway)
-ENV ENV DISABLE_AUTOUPDATER=1 \
+ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_UPDATES=1
 
 # default startup values

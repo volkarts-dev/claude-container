@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+import os
+import signal
+import socket
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import protocol  # noqa: E402
+
+USAGE = """\
+usage: hostrun build|test [ARG...]
+       hostrun --list
+
+Runs the project's build or test command on the host machine and relays its
+output and exit status. --list shows the verbs the host offers for this
+project and the command each of them runs."""
+
+CONNECT_ATTEMPTS = 20
+CONNECT_DELAY = 0.25
+CHUNK = 65536
+
+
+def fail(message, status=2):
+    print(f"hostrun: {message}", file=sys.stderr, flush=True)
+    return status
+
+
+def connect(path):
+    for attempt in range(CONNECT_ATTEMPTS):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(path)
+            return sock
+        except OSError:
+            sock.close()
+            if attempt + 1 < CONNECT_ATTEMPTS:
+                time.sleep(CONNECT_DELAY)
+    return None
+
+
+def exit_status(status):
+    if status < 0:
+        return 128 - status
+    return status if status < 256 else 1
+
+
+def run(sock, reader, verb, args):
+    lock = threading.Lock()
+
+    def send(kind, payload=b""):
+        try:
+            with lock:
+                sock.sendall(protocol.pack_frame(kind, payload))
+        except OSError:
+            pass
+
+    def pump_stdin():
+        try:
+            fd = sys.stdin.fileno()
+        except (OSError, ValueError, AttributeError):
+            send(protocol.STDIN_EOF)
+            return
+        while True:
+            try:
+                chunk = os.read(fd, CHUNK)
+            except OSError:
+                break
+            if not chunk:
+                break
+            send(protocol.STDIN, chunk)
+        send(protocol.STDIN_EOF)
+
+    def interrupt(signum, _frame):
+        print(f"hostrun: forwarding {signal.Signals(signum).name} to the host command", file=sys.stderr, flush=True)
+        send(protocol.KILL)
+
+    signal.signal(signal.SIGINT, interrupt)
+    signal.signal(signal.SIGTERM, interrupt)
+    threading.Thread(target=pump_stdin, daemon=True).start()
+
+    streams = {protocol.STDOUT: sys.stdout.buffer, protocol.STDERR: sys.stderr.buffer}
+    while True:
+        try:
+            frame = protocol.read_frame(reader)
+        except protocol.ProtocolError as error:
+            return fail(f"protocol error: {error}")
+        if frame is None:
+            return fail("connection to the host was lost; the command was killed")
+        kind, payload = frame
+        if kind in streams:
+            streams[kind].write(payload)
+            streams[kind].flush()
+        elif kind == protocol.EXIT:
+            return exit_status(protocol.unpack_status(payload))
+
+
+def main(argv):
+    path = os.environ.get("CLAUDE_HOST_EXEC")
+    if not path:
+        return fail("host exec is not enabled for this session (CLAUDE_HOST_EXEC is unset); "
+                    "start the container with --host-exec, or use the toolchain inside the container")
+    if argv == ["--list"]:
+        verb, args = "list", []
+    elif argv and not argv[0].startswith("-"):
+        verb, args = argv[0], argv[1:]
+    else:
+        print(USAGE, file=sys.stderr)
+        return 2
+
+    sock = connect(path)
+    if sock is None:
+        return fail(f"the host relay is not answering on {path}; retry in a few seconds, "
+                    "it may still be starting")
+    reader = sock.makefile("rb")
+    try:
+        sock.sendall(protocol.encode_header({"verb": verb, "args": args}))
+        try:
+            answer = protocol.read_header(reader)
+        except protocol.ProtocolError as error:
+            return fail(f"no answer from the host: {error}")
+        if not answer.get("ok"):
+            return fail(str(answer.get("error", "request refused")))
+        if verb == "list":
+            verbs = answer.get("verbs") or {}
+            if not verbs:
+                print("the host offers no verbs for this project")
+            for name in sorted(verbs):
+                print(f"{name:<8}{verbs[name]}")
+            return 0
+        argv_text = " ".join(str(part) for part in answer.get("argv", []))
+        print(f"hostrun: {argv_text}  (in {answer.get('cwd', '?')})", file=sys.stderr, flush=True)
+        return run(sock, reader, verb, args)
+    finally:
+        reader.close()
+        sock.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

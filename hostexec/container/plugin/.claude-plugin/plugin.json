@@ -1,0 +1,8 @@
+{
+  "name": "host-exec",
+  "version": "0.1.0",
+  "description": "Run the project's build and test on the host machine from inside the claude-container sandbox",
+  "author": {
+    "name": "claude-container"
+  }
+}

@@ -26,12 +26,18 @@ Two containers on two networks:
   │  no-new-privileges    │                     │                      │
   │  no setuid, no su     │                     │                      │
   │  [throwaway]          │                     │   [reused]           │
-  └───────┬───────────────┘                     └──────────────────────┘
-          │ bind mounts
-          │
+  └───────┬──────────▲────┘                     └──────────────────────┘
+          │          │ engine exec -i (optional, --host-exec)
+          │ bind     │ one stdio session, frames only
+          │ mounts   │
+          │   ┌──────┴───────────────┐
+          │   │  start.py on host    │
+          │   │  hostexec server     │  runs `build` / `test` in the workdir
+          │   └──────────────────────┘
    /workspace/<name>      ← the current directory (workdir) plus any extra paths
    ~/.claude              ← host config directory, read-write, persists sessions
    ~/.gitconfig           ← read-only
+   /opt/hostexec          ← hostrun, relay and the skill, read-only (--host-exec only)
 ```
 
 **The dev container** (`claude/Dockerfile`) is Debian 13 slim with Node.js (from the
@@ -67,6 +73,13 @@ container — recreating it when the upstream, the no-proxy list or either netwo
 changed since it was created (tracked via `claude.*` labels) — waits until tinyproxy
 actually answers, then runs the dev container with the mounts, proxy variables and
 terminal settings in place.
+
+**The host exec package** (`hostexec/`) is the optional bridge described in
+[Running build and test on the host](#running-build-and-test-on-the-host): the frame
+protocol, the server that spawns the commands, the host end of the exec link, the
+detection of the repo's build system and its modules, and under `hostexec/container/`
+the `hostrun` client, the `relay` and the skill plugin that are mounted into the
+container. Tests live in `tests/` and run with `python -m unittest` from the repo root.
 
 **The build script** (`build.py`) builds the two images. With `--update` it pulls the
 latest base images and rebuilds from scratch, ignoring the layer cache.
@@ -176,6 +189,64 @@ cleartext — an `https://` proxy URL will not work, and the script warns about 
 Everything else is left outside. The dev container itself is `--rm`: nothing written
 outside the mounts survives the session.
 
+## Running build and test on the host
+
+The container has a toolchain, but the host has *your* toolchain: the right SDK
+versions, warm caches, local services, signing keys. With `--host-exec` (or
+`CLAUDE_HOST_EXEC=1`) Claude can ask the host to run exactly two things, `build` and
+`test`, mapped to whatever the working directory's build system is:
+
+```sh
+cd ~/projects/my-app
+/path/to/claude-container/start.py --host-exec
+```
+
+```
+host exec: npm (build: npm run build, test: npm run test)
+```
+
+`start.py` looks at the top level of the working directory only and picks the first
+matching module: `package.json` with a `build`/`test` script (npm, pnpm or yarn from the
+lockfile), then exactly one `.sln`/`.slnx` or one `.csproj`/`.fsproj`/`.vbproj`
+(`dotnet build`/`dotnet test`, optionally `--configuration Debug|Release`), then a
+`Makefile` with `build:`/`test:` targets, then `pyproject.toml`/`pytest.ini`
+(`python -m build` / `python -m pytest`, only if those packages are importable by the
+Python running `start.py`). `CLAUDE_HOST_MODULE=name` forces one. With no match the
+feature stays off and the container is started as usual.
+
+Inside the container the tools are `hostrun build`, `hostrun test` and `hostrun --list`,
+plus a Claude Code skill (loaded through `--plugin-dir` from a read-only mount, so it
+exists nowhere on the host's Claude config) that tells Claude when and how to use them.
+The command runs on the host with the working directory as cwd and a fixed
+non-interactive environment (`CI=1`, colours off); stdout, stderr and the exit status
+come back unchanged, stdin is relayed, and killing `hostrun` kills the host process and
+its children. One command runs at a time; a second one is refused with `busy`. Every
+run is logged to `<config dir>/hostexec.log`.
+
+**What this opens up.** `build` on the host means running whatever `package.json`,
+the Makefile or the MSBuild files say, and those files live in the mounted workspace
+that Claude edits. So with host exec on, Claude can run arbitrary code on the host with
+your user's rights by writing it into the build definition. The fixed verb list stops
+arbitrary *commands*, not arbitrary *code*. That is why the feature is opt-in per
+session, why the verb-to-command mapping lives in this repository (`hostexec/modules/`)
+and never in a file under the workspace, why verbs take no free-form arguments (the one
+argument that exists is validated against `Debug|Release`), and why commands always run
+in the mounted workdir with a fixed environment. Turn it on for repositories you would
+run `npm run build` in yourself.
+
+**How the host is reached.** No port, no extra mount for the channel and no change to
+the networks: the host opens one `docker exec -i` (or `podman exec -i`) into the
+running container and runs `/opt/hostexec/relay` there, which listens on a Unix socket
+inside the container's own filesystem (`/tmp/hostexec/sock`). `hostrun` connects to that
+socket; the relay multiplexes the connections over the exec's stdin/stdout as length-
+prefixed frames; `start.py` demultiplexes them and spawns the command. The direction is
+inverted on purpose: nothing inside the container can open anything toward the host,
+and the engine socket is never exposed to it. This works the same on Linux and on a
+Windows or macOS podman/docker machine, where a bind-mounted Unix socket or a host
+listener would not (the container has no route off the host). If the relay dies the
+host restarts it; if `start.py` dies the relay sees EOF and open `hostrun` calls fail
+with a clear message while the container keeps running without the feature.
+
 ## Configuration
 
 Both scripts are configured through environment variables.
@@ -193,6 +264,8 @@ Both scripts are configured through environment variables.
 | `CLAUDE_BRIDGE` | `claude-egress` | Outward-facing network; must carry DNS |
 | `CLAUDE_USERNS` | auto | `--userns` for the dev container |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Host directory mounted as the Claude config |
+| `CLAUDE_HOST_EXEC` | unset | `1` enables host exec, same as `--host-exec` |
+| `CLAUDE_HOST_MODULE` | auto | Force the host exec module: `npm`, `dotnet`, `make` or `python` |
 | `PROXY_IMAGE` / `PROXY_TAG` | `claude-proxy` / `latest` | Proxy image name and tag |
 | `PROXY_CONTAINER` | `claude-proxy` | Proxy container name |
 | `PROXY_PORT` | unset | Host port to publish the proxy on |
@@ -210,5 +283,9 @@ Both scripts are configured through environment variables.
   defense against a kernel exploit.
 - Anything Claude writes under a mounted path is written to the real directory on the
   host. Mount only what you want it to be able to change.
+- With `--host-exec`, `start.py` stays in the foreground for the whole session (it hosts
+  the server) instead of exec-ing into the engine, and the dev container gets a
+  `--name claude-dev-<random>` so the exec can address it. The dev image needs one
+  rebuild after this feature was added, for the `/opt/hostexec` PATH entry.
 - DNS resolution on WSL is a bit wacky, when the host machine is suspended/hibernated. Close all instances
   run `wsl --shutdown` and start again, when the proxy cannot communicate to the outside world.
