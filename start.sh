@@ -276,11 +276,45 @@ if ! "$ENGINE" image inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
     exit 1
 fi
 
+merge_mcp_servers() {
+    local host_file="$1" contained_file="$2" tmp
+    [ -f "$host_file" ] && [ -f "$contained_file" ] || return 0
+    [ "$host_file" -ef "$contained_file" ] && return 0
+    tmp="$(mktemp "${contained_file}.XXXXXX")"
+    if command -v jq >/dev/null 2>&1; then
+        jq --slurpfile host "$host_file" \
+            '.mcpServers = ((.mcpServers // {}) + ($host[0].mcpServers // {}))' \
+            "$contained_file" >"$tmp" || :
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$host_file" "$contained_file" >"$tmp" <<'PY' || :
+import json, sys
+host = json.load(open(sys.argv[1]))
+contained = json.load(open(sys.argv[2]))
+servers = dict(contained.get("mcpServers") or {})
+servers.update(host.get("mcpServers") or {})
+contained["mcpServers"] = servers
+json.dump(contained, sys.stdout, indent=2)
+PY
+    else
+        rm -f "$tmp"
+        printf 'start.sh: neither jq nor python3 found; mcpServers not synced from %s\n' "$host_file" >&2
+        return 0
+    fi
+    if [ -s "$tmp" ]; then
+        chmod --reference="$contained_file" "$tmp" 2>/dev/null || chmod 600 "$tmp"
+        mv "$tmp" "$contained_file"
+    else
+        rm -f "$tmp"
+        printf 'start.sh: merging mcpServers from %s failed; leaving %s unchanged\n' "$host_file" "$contained_file" >&2
+    fi
+}
+
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "${CONFIG_DIR}"
 if [ ! -f "${CONFIG_DIR}/.claude.json" ] && [ -f "$HOME/.claude.json" ]; then
     cp "$HOME/.claude.json" "${CONFIG_DIR}/.claude.json"
 fi
+merge_mcp_servers "$HOME/.claude.json" "${CONFIG_DIR}/.claude.json"
 
 resolve_upstream
 ensure_network

@@ -156,7 +156,13 @@ cleartext — an `https://` proxy URL will not work, and the scripts warn about 
 - `~/.claude` (or `$CLAUDE_CONFIG_DIR`) is mounted read-write and `CLAUDE_CONFIG_DIR`
   points at it, so credentials, settings and session history survive. `.claude.json` is
   kept *inside* that directory — mounting it as a single file would break on Claude
-  Code's atomic rewrite — and is seeded from `~/.claude.json` on first run.
+  Code's atomic rewrite — and is seeded from `~/.claude.json` on first run. On every
+  run the user-scope `mcpServers` from `~/.claude.json` are merged into it (host
+  entries win on the same name; servers added inside the container are kept), so
+  `claude mcp add -s user` on the host shows up in the container. Project-scoped
+  servers are keyed by absolute path and will not match the `/workspace` mount; use a
+  `.mcp.json` in the project for those. `start.sh` needs `jq` or `python3` for the
+  merge.
 - `~/.gitconfig` read-only, if present.
 - `TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, so colous and key
   handling match your terminal. `start.ps1` defaults to `xterm-256color`/`truecolor`

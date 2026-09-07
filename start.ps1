@@ -286,6 +286,31 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+function Merge-McpServers {
+    param([string]$HostFile, [string]$ContainedFile)
+    if (-not (Test-Path -LiteralPath $HostFile) -or -not (Test-Path -LiteralPath $ContainedFile)) { return }
+    if ((Resolve-Path -LiteralPath $HostFile).Path -eq (Resolve-Path -LiteralPath $ContainedFile).Path) { return }
+    try {
+        $hostConfig = Get-Content -LiteralPath $HostFile -Raw | ConvertFrom-Json
+        $contained = Get-Content -LiteralPath $ContainedFile -Raw | ConvertFrom-Json
+    } catch {
+        Write-Warning "merging mcpServers from $HostFile failed; leaving $ContainedFile unchanged: $_"
+        return
+    }
+    $hostServers = $hostConfig.PSObject.Properties['mcpServers'].Value
+    if ($null -eq $hostServers -or $hostServers.PSObject.Properties.Count -eq 0) { return }
+    $merged = $contained.PSObject.Properties['mcpServers'].Value
+    if ($null -eq $merged) { $merged = [PSCustomObject]@{} }
+    foreach ($server in $hostServers.PSObject.Properties) {
+        $merged | Add-Member -MemberType NoteProperty -Name $server.Name -Value $server.Value -Force
+    }
+    $contained | Add-Member -MemberType NoteProperty -Name 'mcpServers' -Value $merged -Force
+    $json = $contained | ConvertTo-Json -Depth 100
+    $tmp = "$ContainedFile.$([System.IO.Path]::GetRandomFileName())"
+    [System.IO.File]::WriteAllText($tmp, $json, [System.Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tmp -Destination $ContainedFile -Force
+}
+
 $configDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $homeDir '.claude' }
 
 if (-not (Test-Path -LiteralPath $configDir)) {
@@ -297,6 +322,7 @@ $containedConfigFile = Join-Path $configDir '.claude.json'
 if ((-not (Test-Path -LiteralPath $containedConfigFile)) -and (Test-Path -LiteralPath $hostConfigFile)) {
     Copy-Item -LiteralPath $hostConfigFile -Destination $containedConfigFile
 }
+Merge-McpServers -HostFile $hostConfigFile -ContainedFile $containedConfigFile
 
 $upstream = Resolve-Upstream
 Initialize-InternalNetwork
