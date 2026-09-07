@@ -61,43 +61,46 @@ joins a normal user-defined bridge network, because the engines' *predefined* br
 networks serve no DNS and an internal network's resolver refuses to forward, which would 
 leave the proxy unable to resolve either its upstream or the sites it is asked to fetch.
 
-**The start scripts** (`start.sh` / `start.ps1`) wire all of this up on every launch:
-they resolve the upstream proxy, create the networks if missing, reuse a running proxy
+**The start script** (`start.py`) wires all of this up on every launch: it
+resolves the upstream proxy, creates the networks if missing, reuses a running proxy
 container — recreating it when the upstream, the no-proxy list or either network has
-changed since it was created (tracked via `claude.*` labels) — wait until tinyproxy
-actually answers, then run the dev container with the mounts, proxy variables and
+changed since it was created (tracked via `claude.*` labels) — waits until tinyproxy
+actually answers, then runs the dev container with the mounts, proxy variables and
 terminal settings in place.
 
-**The build scripts** (`build.sh` / `build.ps1`) build the two images. With `--update`
-(`-Update` in PowerShell) they pull the latest base images and rebuild from scratch,
-ignoring the layer cache. The `.sh` and `.ps1` variants are functionally equivalent; use
-whichever matches your shell.
+**The build script** (`build.py`) builds the two images. With `--update` it pulls the
+latest base images and rebuilds from scratch, ignoring the layer cache.
+
+Both scripts are plain Python with no third-party dependencies and run the same way on
+Linux, macOS and Windows. `start.sh` and `start.ps1` are thin wrappers that run
+`start.py` with the same arguments, for shells where the interpreter is not on the
+path lookup or a file association is more convenient.
+
+## Prerequisites
+
+- Python 3.8 or newer on the host. On Linux and macOS the scripts run directly
+  (`./build.py`); on Windows call them through the interpreter (`python build.py`).
+- Docker or podman, with the engine running.
 
 ## Getting started
 
 Build the images once:
 
 ```sh
-./build.sh                 # both images
-./build.sh [claude|proxy]  # just the dev or proxy image
-./build.sh --update        # pull new base images and rebuild from scratch)
-```
-
-```powershell
-./build.ps1
-./build.sh [claude|proxy]
-./build.ps1 -Update
+./build.py                 # both images
+./build.py [claude|proxy]  # just the dev or proxy image
+./build.py --update        # pull new base images and rebuild from scratch
 ```
 
 Then start Claude from whatever project you want to work on:
 
 ```sh
 cd ~/projects/my-app
-/path/to/claude-container/start.sh
+/path/to/claude-container/start.py      # or start.sh / start.ps1
 ```
 
 The current directory is mounted at `/workspace/my-app` and becomes the working
-directory. The proxy image is built on demand; the dev image is not, so `build.sh` has to
+directory. The proxy image is built on demand; the dev image is not, so `build.py` has to
 have run first.
 
 ## Usage
@@ -106,36 +109,37 @@ Mount extra directories alongside the working directory — each lands under `/w
 named after its last path component, with a `-2`, `-3` suffix on collisions:
 
 ```sh
-./start.sh ../shared-lib ~/data
+./start.py ../shared-lib ~/data
 ```
 
 Pass arguments through to `claude` itself after `--`:
 
 ```sh
-./start.sh -- --resume
-./start.sh ../shared-lib -- --model opus
+./start.py -- --resume
+./start.py ../shared-lib -- --model opus
 ```
 
 ```powershell
-./start.ps1 ..\shared-lib -ClaudeArgs --resume
-./start.ps1 ..\shared-lib ~\data -ClaudeArgs --model,opus
+./start.ps1 ..\shared-lib '--' --model opus
+./start.ps1 ..\shared-lib --% -- --model opus
 ```
 
-In PowerShell several `claude` arguments have to be one comma-separated list, since
-everything not attached to `-ClaudeArgs` is taken as a path to mount.
+Inside a PowerShell session a bare `--` is consumed by PowerShell itself before the
+wrapper sees it, so quote it or put the stop-parsing token `--%` in front of it.
+`pwsh -File start.ps1 ... -- ...` from another shell needs neither.
 
 Use podman instead of docker:
 
 ```sh
-CONTAINER_ENGINE=podman ./start.sh
+CONTAINER_ENGINE=podman ./start.py
 ```
 
 ```powershell
 $env:CONTAINER_ENGINE="podman"
-./start.ps1
+python start.py
 ```
 
-Under rootless podman the scripts default to `--userns keep-id` so the bind-mounted
+Under rootless podman the script defaults to `--userns keep-id` so the bind-mounted
 workspace stays owned by your uid.
 
 ### Behind a corporate proxy
@@ -143,13 +147,13 @@ workspace stays owned by your uid.
 ```sh
 CLAUDE_PROXY=http://proxy.corp:3128 \
 CLAUDE_NO_PROXY=.corp.example,10.0.0.0/8 \
-./start.sh
+./start.py
 ```
 
 `CLAUDE_PROXY` falls back to `HTTPS_PROXY`/`HTTP_PROXY` and `CLAUDE_NO_PROXY` to
 `NO_PROXY`, so an already-configured shell usually just works. A proxy on `localhost` is
 rewritten to the host gateway automatically. Note that tinyproxy talks to its upstream in
-cleartext — an `https://` proxy URL will not work, and the scripts warn about it.
+cleartext — an `https://` proxy URL will not work, and the script warns about it.
 
 ### What gets carried into the container
 
@@ -161,12 +165,11 @@ cleartext — an `https://` proxy URL will not work, and the scripts warn about 
   entries win on the same name; servers added inside the container are kept), so
   `claude mcp add -s user` on the host shows up in the container. Project-scoped
   servers are keyed by absolute path and will not match the `/workspace` mount; use a
-  `.mcp.json` in the project for those. `start.sh` needs `jq` or `python3` for the
-  merge.
+  `.mcp.json` in the project for those.
 - `~/.gitconfig` read-only, if present.
-- `TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, so colous and key
-  handling match your terminal. `start.ps1` defaults to `xterm-256color`/`truecolor`
-  since Windows consoles set neither.
+- `TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, so colours and key
+  handling match your terminal. On Windows `start.py` defaults to
+  `xterm-256color`/`truecolor` since Windows consoles set neither.
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` — only when set on the host.
 
@@ -175,8 +178,7 @@ outside the mounts survives the session.
 
 ## Configuration
 
-Both scripts read the same environment variables; `start.ps1` and `build.ps1` also expose
-them as named parameters.
+Both scripts are configured through environment variables.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -201,7 +203,7 @@ them as named parameters.
 - The proxy container outlives the session on purpose (`--restart unless-stopped`), so
   repeated starts are fast. Remove it with `docker rm -f claude-proxy` if you want a
   clean state; the next start rebuilds it.
-- `start.sh` refuses a pre-existing `CLAUDE_NET` that is not `--internal`, and a
+- `start.py` refuses a pre-existing `CLAUDE_NET` that is not `--internal`, and a
   `CLAUDE_BRIDGE` that is — either would break the containment or the egress.
 - The sandbox constrains *network* and *filesystem* reach. The dev user cannot escalate
   to root inside the container, but the container is still a container: it is not a
