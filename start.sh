@@ -1,2 +1,3 @@
 #!/usr/bin/env sh
-exec python3 "$(dirname -- "$0")/start.py" "$@"
+SCRIPT="$(readlink -f "$0")"
+exec python3 "$(dirname -- "$SCRIPT")/start.py" "$@"
