@@ -426,6 +426,13 @@ def run_args(s, paths):
     if gitconfig.is_file():
         args += ["-v", f"{gitconfig}:{s.container_home}/.gitconfig:ro"]
 
+    if shutil.which("git"):
+        autocrlf = query(["git", "-C", str(cwd), "config", "--get", "core.autocrlf"])
+        if autocrlf:
+            args += ["-e", "GIT_CONFIG_COUNT=1",
+                     "-e", "GIT_CONFIG_KEY_0=core.autocrlf",
+                     "-e", f"GIT_CONFIG_VALUE_0={autocrlf}"]
+
     for name in PASSTHROUGH_VARS:
         if os.environ.get(name):
             args += ["-e", name]

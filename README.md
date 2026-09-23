@@ -180,6 +180,11 @@ cleartext — an `https://` proxy URL will not work, and the script warns about 
   servers are keyed by absolute path and will not match the `/workspace` mount; use a
   `.mcp.json` in the project for those.
 - `~/.gitconfig` read-only, if present.
+- `core.autocrlf` as the host's git resolves it for the working directory, passed as
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`. Git for Windows keeps its
+  default in the system config, which is not mounted, so without this the container's git
+  would report every CRLF file in a Windows checkout as modified. Unset on the host means
+  nothing is passed.
 - `TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, so colours and key
   handling match your terminal. On Windows `start.py` defaults to
   `xterm-256color`/`truecolor` since Windows consoles set neither.
