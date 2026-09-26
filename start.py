@@ -38,6 +38,10 @@ component of that path.
 
 Anything after -- is passed on to claude itself, or to bash with -s.
 
+Environment variables reach the container only when named: -e NAME forwards
+the host's value (nothing is set when it is unset on the host), -e NAME=VALUE
+sets one explicitly. CLAUDE_ENV names host variables to forward on every start.
+
 Networking
   The claude container runs on an internal container network with no route off
   the host. Its only way out is the tinyproxy container, which sits on that
@@ -79,6 +83,8 @@ environment:
                    not
   CLAUDE_USERNS    --userns for the claude container; unset picks keep-id under
                    rootless podman and nothing otherwise
+  CLAUDE_ENV       comma-separated names of host variables forwarded into the
+                   container, like -e NAME for each
   CLAUDE_CONFIG_DIR host directory mounted as the Claude config
                    (default ~/.claude)
   CLAUDE_HOST_EXEC 1 enables host exec, same as --host-exec
@@ -155,6 +161,7 @@ class Settings:
         self.home = Path.home()
         self.config_dir = Path(env("CLAUDE_CONFIG_DIR", default=str(self.home / ".claude")))
         self.host_exec = env("CLAUDE_HOST_EXEC").lower() in ("1", "true", "yes", "on")
+        self.forward_env = [name.strip() for name in env("CLAUDE_ENV").split(",") if name.strip()]
         self.container_name = ""
 
 
@@ -165,7 +172,7 @@ def parse_args(argv):
         argv, claude_args = argv[:split], argv[split + 1:]
     parser = argparse.ArgumentParser(
         prog="start.py",
-        usage="%(prog)s [--host-exec] [-s] [PATH...] [-- CLAUDE_ARG...]",
+        usage="%(prog)s [--host-exec] [-s] [-e NAME[=VALUE]]... [PATH...] [-- CLAUDE_ARG...]",
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -175,7 +182,13 @@ def parse_args(argv):
                         help="let claude run the repo's build and test on the host")
     parser.add_argument("-s", "--shell", action="store_true",
                         help="run bash in the container instead of claude")
+    parser.add_argument("-e", "--env", action="append", default=[], metavar="NAME[=VALUE]",
+                        help="set a variable in the container, or forward the host's "
+                             "value when no VALUE is given; repeatable")
     options = parser.parse_args(argv)
+    for item in options.env:
+        if not item.partition("=")[0]:
+            parser.error(f"invalid -e {item!r}: variable name is empty")
     return options, claude_args
 
 
@@ -367,7 +380,7 @@ def resolve_userns(s):
     return ""
 
 
-def run_args(s, paths):
+def run_args(s, paths, extra_env):
     in_proxy = f"http://proxy:{PROXY_LISTEN}"
     no_proxy = "localhost,127.0.0.1,::1,proxy"
     args = [
@@ -436,6 +449,9 @@ def run_args(s, paths):
     for name in PASSTHROUGH_VARS:
         if os.environ.get(name):
             args += ["-e", name]
+
+    for item in [*s.forward_env, *extra_env]:
+        args += ["-e", item]
     return args
 
 
@@ -519,7 +535,7 @@ def main():
     ensure_network(s)
     ensure_bridge_network(s)
     ensure_proxy(s)
-    args = run_args(s, options.paths)
+    args = run_args(s, options.paths, options.env)
     program = "bash" if options.shell else "claude"
     server = prepare_host_exec(s) if s.host_exec else None
     if server is None:

@@ -141,6 +141,15 @@ Inside a PowerShell session a bare `--` is consumed by PowerShell itself before 
 wrapper sees it, so quote it or put the stop-parsing token `--%` in front of it.
 `pwsh -File start.ps1 ... -- ...` from another shell needs neither.
 
+Pass environment variables into the container with `-e`, repeatable. `-e NAME` forwards
+the host's value (and sets nothing when it is unset there), `-e NAME=VALUE` sets it
+explicitly. Variables you always want forwarded can be listed by name in `CLAUDE_ENV`:
+
+```sh
+./start.py -e GITHUB_TOKEN -e DOTNET_CLI_TELEMETRY_OPTOUT=1
+CLAUDE_ENV=GITHUB_TOKEN,NUGET_API_KEY ./start.py
+```
+
 Use podman instead of docker:
 
 ```sh
@@ -268,6 +277,7 @@ Both scripts are configured through environment variables.
 | `CLAUDE_NET` | `claude-internal` | Internal network name |
 | `CLAUDE_BRIDGE` | `claude-egress` | Outward-facing network; must carry DNS |
 | `CLAUDE_USERNS` | auto | `--userns` for the dev container |
+| `CLAUDE_ENV` | unset | Comma-separated names of host variables forwarded into the dev container |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Host directory mounted as the Claude config |
 | `CLAUDE_HOST_EXEC` | unset | `1` enables host exec, same as `--host-exec` |
 | `CLAUDE_HOST_MODULE` | auto | Force the host exec module: `npm`, `dotnet`, `make` or `python` |
