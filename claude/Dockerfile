@@ -54,6 +54,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
+# C/C++ tooling: the GCC sanitizer runtimes (ASan, UBSan, LSan, TSan, HWASan)
+# matching the distro gcc, and clang-format from apt.llvm.org (latest stable
+# LLVM unless LLVM_VERSION is given)
+ARG LLVM_VERSION=
+RUN set -eux; \
+    PKGS="libasan8 libubsan1"; \
+    case "$(dpkg --print-architecture)" in \
+        amd64|arm64) PKGS="$PKGS liblsan0 libtsan2 libhwasan0" ;; \
+    esac; \
+    LLVM_VERSION="${LLVM_VERSION:-$(curl -fsSL https://apt.llvm.org/llvm.sh | sed -n 's/^CURRENT_LLVM_STABLE=\([0-9]*\)$/\1/p')}"; \
+    test -n "$LLVM_VERSION"; \
+    . /etc/os-release; \
+    install -d /etc/apt/keyrings; \
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/keyrings/apt.llvm.org.asc; \
+    printf 'Types: deb\nURIs: https://apt.llvm.org/%s/\nSuites: llvm-toolchain-%s-%s\nComponents: main\nSigned-By: /etc/apt/keyrings/apt.llvm.org.asc\n' \
+        "$VERSION_CODENAME" "$VERSION_CODENAME" "$LLVM_VERSION" > /etc/apt/sources.list.d/llvm.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends $PKGS "clang-format-${LLVM_VERSION}"; \
+    rm -rf /var/lib/apt/lists/*; \
+    for tool in clang-format git-clang-format clang-format-diff; do \
+        ln -s "/usr/bin/${tool}-${LLVM_VERSION}" "/usr/local/bin/${tool}"; \
+    done; \
+    clang-format --version
+
 # Node.js from the official nodejs.org build (latest v${NODE_MAJOR}.x), checksum verified
 RUN set -eux; \
     case "$(dpkg --print-architecture)" in \

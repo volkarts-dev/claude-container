@@ -24,6 +24,7 @@ environment:
   CONTAINER_USER   user inside the dev image (default dev)
   NODE_MAJOR       Node.js major version (default 22)
   DOTNET_CHANNEL   .NET channel (default 10.0)
+  LLVM_VERSION     LLVM major version for clang-format (default latest stable)
   PROXY_IMAGE      proxy image name (default claude-proxy)
   PROXY_TAG        proxy image tag (default latest)"""
 
@@ -58,6 +59,7 @@ def build_claude(engine, build_args):
         "--build-arg", f"USERNAME={env('CONTAINER_USER', 'dev')}",
         "--build-arg", f"NODE_MAJOR={env('NODE_MAJOR', '22')}",
         "--build-arg", f"DOTNET_CHANNEL={env('DOTNET_CHANNEL', '10.0')}",
+        "--build-arg", f"LLVM_VERSION={env('LLVM_VERSION', '')}",
         "-t", image,
         *build_args,
         str(SCRIPT_DIR / "claude"),

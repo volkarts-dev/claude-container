@@ -43,7 +43,8 @@ Two containers on two networks:
 **The dev container** (`claude/Dockerfile`) is Debian 13 slim with Node.js (from the
 official nodejs.org tarball, checksum verified), the .NET SDK, PowerShell (from the
 official GitHub release tarball, checksum verified), `git`, `git-lfs`, `ripgrep`,
-`fd-find`, `jq`, build and test tooling, Python 3 and the usual shell utilities. The
+`fd-find`, `jq`, build and test tooling (including the GCC sanitizer runtimes and
+`clang-format` from apt.llvm.org), Python 3 and the usual shell utilities. The
 Claude Code CLI is installed globally with npm. It runs as an unprivileged user (`dev`
 by default) created with the *host's* uid/gid, so files written into the mounted
 workspace keep the right ownership. `tini` is the entrypoint so signals and zombie
@@ -272,6 +273,7 @@ Both scripts are configured through environment variables.
 | `CONTAINER_USER` | `dev` | User inside the dev image |
 | `NODE_MAJOR` | `22` | Node.js major version (build only) |
 | `DOTNET_CHANNEL` | `10.0` | .NET channel (build only) |
+| `LLVM_VERSION` | latest stable | LLVM major version for clang-format (build only) |
 | `CLAUDE_PROXY` | `HTTPS_PROXY`/`HTTP_PROXY` | Upstream proxy the egress forwards to; unset means direct |
 | `CLAUDE_NO_PROXY` | `NO_PROXY` | Hosts, domains (`.corp.example`) and networks (`10.0.0.0/8`) reached without the upstream |
 | `CLAUDE_NET` | `claude-internal` | Internal network name |
