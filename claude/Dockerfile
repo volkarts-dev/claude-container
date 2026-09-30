@@ -37,6 +37,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         man-db \
         build-essential \
         pkg-config \
+        cmake \
+        ninja-build \
+        libx11-dev \
+        libxext-dev \
+        libxrandr-dev \
+        libxinerama-dev \
+        libxcursor-dev \
+        libxi-dev \
+        libxkbcommon-dev \
+        libwayland-dev \
+        libgl-dev \
         python3 \
         python3-venv \
         python3-pip \

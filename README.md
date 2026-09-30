@@ -43,8 +43,10 @@ Two containers on two networks:
 **The dev container** (`claude/Dockerfile`) is Debian 13 slim with Node.js (from the
 official nodejs.org tarball, checksum verified), the .NET SDK, PowerShell (from the
 official GitHub release tarball, checksum verified), `git`, `git-lfs`, `ripgrep`,
-`fd-find`, `jq`, build and test tooling (including the GCC sanitizer runtimes and
-`clang-format` from apt.llvm.org), Python 3 and the usual shell utilities. The
+`fd-find`, `jq`, build and test tooling (including CMake, Ninja, the GCC sanitizer
+runtimes, `clang-format` from apt.llvm.org and the X11/Wayland/OpenGL development
+headers needed to build windowing libraries such as GLFW), Python 3 and the usual
+shell utilities. The
 Claude Code CLI is installed globally with npm. It runs as an unprivileged user (`dev`
 by default) created with the *host's* uid/gid, so files written into the mounted
 workspace keep the right ownership. `tini` is the entrypoint so signals and zombie
