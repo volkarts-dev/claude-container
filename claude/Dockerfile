@@ -10,7 +10,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# C/C++ tooling comes from the distro too: gcc and clang, clang-format (with
+# git-clang-format and clang-format-diff), the clang compiler-rt runtimes and the
+# GCC sanitizer runtimes (ASan, UBSan, plus LSan, TSan, HWASan where gcc has them)
+RUN set -eux; \
+    SANITIZERS="libasan8 libubsan1"; \
+    case "$(dpkg --print-architecture)" in \
+        amd64|arm64) SANITIZERS="$SANITIZERS liblsan0 libtsan2 libhwasan0" ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         wget \
@@ -36,9 +45,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
         man-db \
         build-essential \
+        clang \
+        clang-format \
+        clang-tidy \
+        libclang-rt-dev \
         pkg-config \
         cmake \
         ninja-build \
+        glslc \
         libx11-dev \
         libxext-dev \
         libxrandr-dev \
@@ -48,6 +62,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxkbcommon-dev \
         libwayland-dev \
         libgl-dev \
+        xvfb \
+        xauth \
         python3 \
         python3-venv \
         python3-pip \
@@ -63,31 +79,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgssapi-krb5-2 \
         libstdc++6 \
         zlib1g \
-    && rm -rf /var/lib/apt/lists/*
-
-# C/C++ tooling: the GCC sanitizer runtimes (ASan, UBSan, LSan, TSan, HWASan)
-# matching the distro gcc, and clang-format from apt.llvm.org (latest stable
-# LLVM unless LLVM_VERSION is given)
-ARG LLVM_VERSION=
-RUN set -eux; \
-    PKGS="libasan8 libubsan1"; \
-    case "$(dpkg --print-architecture)" in \
-        amd64|arm64) PKGS="$PKGS liblsan0 libtsan2 libhwasan0" ;; \
-    esac; \
-    LLVM_VERSION="${LLVM_VERSION:-$(curl -fsSL https://apt.llvm.org/llvm.sh | sed -n 's/^CURRENT_LLVM_STABLE=\([0-9]*\)$/\1/p')}"; \
-    test -n "$LLVM_VERSION"; \
-    . /etc/os-release; \
-    install -d /etc/apt/keyrings; \
-    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/keyrings/apt.llvm.org.asc; \
-    printf 'Types: deb\nURIs: https://apt.llvm.org/%s/\nSuites: llvm-toolchain-%s-%s\nComponents: main\nSigned-By: /etc/apt/keyrings/apt.llvm.org.asc\n' \
-        "$VERSION_CODENAME" "$VERSION_CODENAME" "$LLVM_VERSION" > /etc/apt/sources.list.d/llvm.sources; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends $PKGS "clang-format-${LLVM_VERSION}"; \
-    rm -rf /var/lib/apt/lists/*; \
-    for tool in clang-format git-clang-format clang-format-diff; do \
-        ln -s "/usr/bin/${tool}-${LLVM_VERSION}" "/usr/local/bin/${tool}"; \
-    done; \
-    clang-format --version
+        $SANITIZERS; \
+    rm -rf /var/lib/apt/lists/*
 
 # Node.js from the official nodejs.org build (latest v${NODE_MAJOR}.x), checksum verified
 RUN set -eux; \
@@ -156,8 +149,23 @@ RUN if getent group "${USER_GID}" >/dev/null; then \
     fi \
     && mkdir -p /workspace && chown "${USER_UID}:${USER_GID}" /workspace
 
-# more deps for downloaded dev-tools
-RUN npx playwright install-deps
+# Playwright with Chromium and its system dependencies in one go. It is installed
+# as root (deps need apt), so the browsers go to a shared path the user owns and
+# can add other browsers or revisions to.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN set -eux; \
+    npm install -g playwright; \
+    playwright install --with-deps chromium; \
+    chown -R "${USER_UID}:${USER_GID}" "${PLAYWRIGHT_BROWSERS_PATH}"; \
+    npm cache clean --force; \
+    rm -rf /var/lib/apt/lists/*; \
+    playwright --version
+
+# The entrypoint starts Xvfb as the container user, which can't create the X
+# socket directory itself the way the X server expects it (root-owned, sticky)
+RUN install -d -m 1777 /tmp/.X11-unix
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
 # No path to root from inside: every setuid/setgid bit is cleared and the
 # switch-user tools are removed, so the container user stays the container user.
@@ -177,16 +185,12 @@ RUN mkdir -p "${NPM_CONFIG_PREFIX}" "${HOME}/.claude" \
     && npm cache clean --force \
     && claude --version
 
-RUN npm install -g playwright \
-    && playwright install chromium \
-    && npm cache clean --force \
-    && playwright --version
-
 # disabled updates (they would be gone on container restart anyway)
 ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_UPDATES=1
 
 # default startup values
+ENV DISPLAY=:99
 WORKDIR /workspace
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
