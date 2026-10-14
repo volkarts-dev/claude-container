@@ -27,4 +27,17 @@ else
     printf 'no upstream proxy set, going out directly\n' >&2
 fi
 
+if [ -n "${HOST_PORTS:-}" ]; then
+    if ! command -v socat >/dev/null 2>&1; then
+        printf 'socat is missing, rebuild the proxy image; host ports %s are not forwarded\n' "$HOST_PORTS" >&2
+    else
+        IFS=,
+        for port in $HOST_PORTS; do
+            socat TCP-LISTEN:"$port",fork TCP:"$HOST_TARGET":"$port" &
+        done
+        unset IFS
+        printf 'forwarding ports %s to %s\n' "$HOST_PORTS" "$HOST_TARGET" >&2
+    fi
+fi
+
 exec /usr/bin/tinyproxy -d -c "$CONF"

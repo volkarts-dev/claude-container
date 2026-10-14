@@ -3,11 +3,13 @@ FROM debian:13-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        socat \
         tinyproxy \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
 COPY tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
+COPY filter /etc/tinyproxy/filter
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 

@@ -27,6 +27,7 @@ RUN set -eux; \
         git \
         git-lfs \
         openssh-client \
+        socat \
         less \
         jq \
         ripgrep \

@@ -16,4 +16,13 @@ if [ ! -S "$SOCKET" ]; then
     [ -S "$SOCKET" ] || printf 'Xvfb did not come up on %s, see /tmp/xvfb.log\n' "$DISPLAY" >&2
 fi
 
+if [ -n "${CLAUDE_HOST_PORTS:-}" ]; then
+    IFS=,
+    for port in $CLAUDE_HOST_PORTS; do
+        socat TCP4-LISTEN:"$port",bind=127.0.0.1,fork TCP:proxy:"$port" >>/tmp/socat.log 2>&1 &
+        socat TCP6-LISTEN:"$port",bind=[::1],ipv6only,fork TCP:proxy:"$port" >>/tmp/socat.log 2>&1 &
+    done
+    unset IFS
+fi
+
 exec "$@"

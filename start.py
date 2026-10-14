@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -13,6 +14,8 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROXY_LISTEN = 3128
+DEV_PREFIX = "claude-dev"
+ORPHAN_GRACE = 60
 HOST_ALIASES = {
     "localhost", "127.0.0.1", "::1", "[::1]",
     "host.docker.internal", "host.containers.internal",
@@ -23,7 +26,7 @@ PASSTHROUGH_VARS = (
 )
 
 DESCRIPTION = """\
-Ensures the egress proxy is running, then starts claude in a container. The
+Starts an egress proxy for this session, then claude in a container. The
 current directory is always mounted and used as the working directory. Each
 additional PATH is mounted read-write under /workspace, named after the last
 component of that path.
@@ -39,13 +42,27 @@ Networking
   the host. Its only way out is the tinyproxy container, which sits on that
   network as http://proxy:3128 and on a second, outward-facing network. That
   proxy goes out over the host connection, or forwards to the corporate proxy
-  named by CLAUDE_PROXY, except for the hosts named by CLAUDE_NO_PROXY. A proxy
-  container left over from an earlier start is reused, and recreated when its
-  upstream, that list or either network differs from the one in the current
-  environment.
+  named by CLAUDE_PROXY, except for the hosts named by CLAUDE_NO_PROXY. It
+  passes plain HTTP to port 80 and CONNECT to port 443 only.
+
+  Every start gets its own internal network and proxy container, which are
+  removed together with the claude container when the session ends. Proxies
+  and networks whose session is gone, because this script was killed before it
+  could clean up, are removed on the next start.
 
   The proxy image is built on demand; the dev image has to be built beforehand
-  with build.py."""
+  with build.py.
+
+Host ports
+  Each --host-port PORT (or entry in CLAUDE_HOST_PORTS) makes a TCP port of the
+  host reachable as localhost:PORT inside the claude container. A forwarder in
+  the claude container hands the connection to the proxy container, where a
+  second one passes it on to the host gateway on the same port. Only the named
+  ports are forwarded, and only to the host. The service on the host has to
+  listen on an address the host gateway reaches, which on a Linux engine is
+  not the loopback interface. Where the host gateway does not lead to the
+  machine the service runs on, like Windows behind a podman machine in WSL2,
+  CLAUDE_HOST_TARGET names the address to forward to instead."""
 
 EPILOG = """\
 environment:
@@ -56,7 +73,8 @@ environment:
   CLAUDE_NO_PROXY  comma-separated hosts, domains (.corp.example) and networks
                    (10.0.0.0/8) the proxy reaches directly instead of through
                    the upstream; falls back to NO_PROXY
-  CLAUDE_NET       internal network name (default claude-internal)
+  CLAUDE_NET       internal network name prefix, the session id is appended
+                   (default claude-internal)
   CLAUDE_BRIDGE    outward-facing network the proxy reaches the outside on,
                    created when missing (default claude-egress); it has to
                    carry DNS, which the engines' predefined bridge networks do
@@ -65,6 +83,11 @@ environment:
                    rootless podman and nothing otherwise
   CLAUDE_ENV       comma-separated names of host variables forwarded into the
                    container, like -e NAME for each
+  CLAUDE_HOST_PORTS comma-separated host ports reachable as localhost:PORT in
+                   the container, like --host-port PORT for each
+  CLAUDE_HOST_TARGET host name or address the proxy forwards those ports to
+                   (default host.docker.internal or host.containers.internal,
+                   mapped to the engine's host-gateway)
   CLAUDE_CONFIG_DIR host directory mounted as the Claude config
                    (default ~/.claude)
   CLAUDE_IMAGE     dev image name (default claude-dev)
@@ -72,8 +95,10 @@ environment:
   CONTAINER_USER   user inside the dev image (default dev)
   PROXY_IMAGE      proxy image name (default claude-proxy)
   PROXY_TAG        proxy image tag (default latest)
-  PROXY_CONTAINER  proxy container name (default claude-proxy)
-  PROXY_PORT       host port to publish the proxy on; unset publishes nothing
+  PROXY_CONTAINER  proxy container name prefix, the session id is appended
+                   (default claude-proxy)
+  PROXY_PORT       host port to publish the proxy on; unset publishes nothing;
+                   only one session at a time can hold it
   PROXY_BIND       host address for that port (default 127.0.0.1)"""
 
 
@@ -126,10 +151,12 @@ class Settings:
         self.image = f"{env('CLAUDE_IMAGE', default='claude-dev')}:{env('CLAUDE_TAG', default='latest')}"
         self.container_user = env("CONTAINER_USER", default="dev")
         self.container_home = f"/home/{self.container_user}"
-        self.net_name = env("CLAUDE_NET", default="claude-internal")
+        self.session = secrets.token_hex(4)
+        self.net_name = f"{env('CLAUDE_NET', default='claude-internal')}-{self.session}"
         self.bridge_net = env("CLAUDE_BRIDGE", default="claude-egress")
         self.proxy_image = f"{env('PROXY_IMAGE', default='claude-proxy')}:{env('PROXY_TAG', default='latest')}"
-        self.proxy_name = env("PROXY_CONTAINER", default="claude-proxy")
+        self.dev_name = f"{DEV_PREFIX}-{self.session}"
+        self.proxy_name = f"{env('PROXY_CONTAINER', default='claude-proxy')}-{self.session}"
         self.proxy_publish = env("PROXY_PORT")
         self.proxy_bind = env("PROXY_BIND", default="127.0.0.1")
         self.no_upstream = env("CLAUDE_NO_PROXY", "NO_PROXY", "no_proxy")
@@ -138,6 +165,20 @@ class Settings:
         self.home = Path.home()
         self.config_dir = Path(env("CLAUDE_CONFIG_DIR", default=str(self.home / ".claude")))
         self.forward_env = [name.strip() for name in env("CLAUDE_ENV").split(",") if name.strip()]
+        self.host_ports = []
+        self.host_target = ""
+
+
+def host_port(text):
+    try:
+        port = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port {text!r}")
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"port {port} out of range")
+    if port == PROXY_LISTEN:
+        raise argparse.ArgumentTypeError(f"port {port} is taken by the proxy itself")
+    return port
 
 
 def parse_args(argv):
@@ -147,7 +188,7 @@ def parse_args(argv):
         argv, claude_args = argv[:split], argv[split + 1:]
     parser = argparse.ArgumentParser(
         prog="start.py",
-        usage="%(prog)s [-s] [-e NAME[=VALUE]]... [PATH...] [-- CLAUDE_ARG...]",
+        usage="%(prog)s [-s] [-e NAME[=VALUE]]... [--host-port PORT]... [PATH...] [-- CLAUDE_ARG...]",
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -158,6 +199,9 @@ def parse_args(argv):
     parser.add_argument("-e", "--env", action="append", default=[], metavar="NAME[=VALUE]",
                         help="set a variable in the container, or forward the host's "
                              "value when no VALUE is given; repeatable")
+    parser.add_argument("--host-port", action="append", default=[], type=host_port, metavar="PORT",
+                        help="make a TCP port of the host reachable as localhost:PORT "
+                             "in the container; repeatable")
     options = parser.parse_args(argv)
     for item in options.env:
         if not item.partition("=")[0]:
@@ -211,6 +255,29 @@ def resolve_upstream(s):
     s.upstream = f"{creds}@{host}:{port}" if creds else f"{host}:{port}"
 
 
+def resolve_host_ports(cli_ports):
+    ports = set(cli_ports)
+    for item in env("CLAUDE_HOST_PORTS").split(","):
+        if item.strip():
+            try:
+                ports.add(host_port(item.strip()))
+            except argparse.ArgumentTypeError as error:
+                die(f"CLAUDE_HOST_PORTS: {error}")
+    return sorted(ports)
+
+
+def resolve_host_target():
+    target = env("CLAUDE_HOST_TARGET").strip()
+    if not target:
+        return ""
+    if re.match(r"^[A-Za-z0-9.\-]+$", target):
+        return target
+    match = re.match(r"^\[?([0-9A-Fa-f:.]+)\]?$", target)
+    if match and ":" in match.group(1):
+        return f"[{match.group(1)}]"
+    die(f"CLAUDE_HOST_TARGET: invalid host {target!r}")
+
+
 def ensure_engine(s):
     if not shutil.which(s.engine):
         die(f"{s.engine} is not installed or not on PATH")
@@ -222,14 +289,12 @@ def network_field(s, name, field):
     return query([s.engine, "network", "inspect", "-f", "{{" + field + "}}", name])
 
 
-def ensure_network(s):
-    internal = network_field(s, s.net_name, ".Internal")
-    if internal is not None:
-        if internal != "true":
-            die(f"network {s.net_name} exists but is not internal; remove it or set CLAUDE_NET")
-        return
-    must([s.engine, "network", "create", "--internal", s.net_name])
-    note(f"created internal network {s.net_name}")
+def create_session_network(s):
+    must([s.engine, "network", "create", "--internal",
+          "--label", "claude.role=session",
+          "--label", f"claude.session={s.session}",
+          "--label", f"claude.created={int(time.time())}",
+          s.net_name])
 
 
 def ensure_bridge_network(s):
@@ -253,35 +318,50 @@ def wait_proxy(s):
     die(f"proxy {s.proxy_name} is not answering on port {PROXY_LISTEN}; see {s.engine} logs {s.proxy_name}")
 
 
-def ensure_proxy(s):
-    labels = "|".join(f'{{{{index .Config.Labels "claude.{key}"}}}}'
-                      for key in ("upstream", "noupstream", "network", "bridge"))
-    current = query([s.engine, "inspect", "-f", labels, s.proxy_name]) or ""
-    wanted = f"{s.upstream}|{s.no_upstream}|{s.net_name}|{s.bridge_net}"
-    if current == wanted:
-        if query([s.engine, "inspect", "-f", "{{.State.Running}}", s.proxy_name]) != "true":
-            must([s.engine, "start", s.proxy_name])
-        wait_proxy(s)
-        return
-    if current:
-        note(f"proxy settings changed, recreating {s.proxy_name}")
+def ensure_proxy_image(s):
     if not succeeds([s.engine, "image", "inspect", s.proxy_image]):
         build_env = dict(os.environ, CONTAINER_ENGINE=s.engine)
         result = subprocess.run([sys.executable, str(SCRIPT_DIR / "build.py"), "proxy"], env=build_env)
         if result.returncode != 0:
             sys.exit(result.returncode)
-    subprocess.run([s.engine, "rm", "-f", s.proxy_name],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+
+def quietly(cmd):
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def session_gone(s, session):
+    return bool(session) and not succeeds([s.engine, "inspect", f"{DEV_PREFIX}-{session}"])
+
+
+def remove_orphans(s):
+    ids = (query([s.engine, "ps", "-aq", "--filter", "label=claude.role=proxy"]) or "").split()
+    for container in ids:
+        session = query([s.engine, "inspect", "-f", '{{index .Config.Labels "claude.session"}}', container])
+        if session_gone(s, session):
+            quietly([s.engine, "rm", "-f", container])
+            note(f"removed proxy {container} left over from session {session}")
+
+    ids = (query([s.engine, "network", "ls", "-q", "--filter", "label=claude.role=session"]) or "").split()
+    for network in ids:
+        labels = query([s.engine, "network", "inspect", "-f",
+                        '{{index .Labels "claude.session"}}|{{index .Labels "claude.created"}}', network])
+        session, _, created = (labels or "").partition("|")
+        if not created.isdigit() or time.time() - int(created) < ORPHAN_GRACE:
+            continue
+        if session_gone(s, session):
+            quietly([s.engine, "network", "rm", network])
+            note(f"removed network {network} left over from session {session}")
+
+
+def start_proxy(s):
+    host_ports = ",".join(str(port) for port in s.host_ports)
     args = [
         "--name", s.proxy_name,
-        "--restart", "unless-stopped",
-        "--network", s.net_name,
-        "--network-alias", "proxy",
-        "--label", f"claude.upstream={s.upstream}",
-        "--label", f"claude.noupstream={s.no_upstream}",
-        "--label", f"claude.network={s.net_name}",
-        "--label", f"claude.bridge={s.bridge_net}",
+        "--rm",
+        "--network", s.bridge_net,
+        "--label", "claude.role=proxy",
+        "--label", f"claude.session={s.session}",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
     ]
@@ -289,19 +369,30 @@ def ensure_proxy(s):
         args += ["-e", f"UPSTREAM_PROXY={s.upstream}"]
     if s.no_upstream:
         args += ["-e", f"NO_UPSTREAM={s.no_upstream}"]
-    if s.host_gateway:
+    if host_ports:
+        args += ["-e", f"HOST_PORTS={host_ports}", "-e", f"HOST_TARGET={s.host_target or s.host_internal}"]
+    if s.host_gateway or (host_ports and not s.host_target):
         args += ["--add-host", f"{s.host_internal}:host-gateway"]
     if s.proxy_publish:
         args += ["-p", f"{s.proxy_bind}:{s.proxy_publish}:{PROXY_LISTEN}"]
 
-    # Created, bridged, then started: tinyproxy must never come up on a container
-    # that cannot yet resolve its upstream.
+    # Created on the bridge, joined to the session network, then started: tinyproxy
+    # must never come up on a container that cannot yet resolve its upstream, and
+    # host-gateway must resolve on the bridge, not on the internal network.
     must([s.engine, "create", *args, s.proxy_image])
-    must([s.engine, "network", "connect", s.bridge_net, s.proxy_name], quiet=False)
+    must([s.engine, "network", "connect", "--alias", "proxy", s.net_name, s.proxy_name], quiet=False)
     must([s.engine, "start", s.proxy_name])
     wait_proxy(s)
     described = s.upstream.rpartition("@")[2] if s.upstream else "direct"
     note(f"proxy {s.proxy_name} serving {s.net_name} -> {described}")
+
+
+def remove_session(s):
+    for name in ("SIGHUP", "SIGTERM"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), signal.SIG_IGN)
+    quietly([s.engine, "rm", "-f", s.dev_name, s.proxy_name])
+    quietly([s.engine, "network", "rm", s.net_name])
 
 
 def merge_mcp_servers(host_file, contained_file):
@@ -357,7 +448,10 @@ def run_args(s, paths, extra_env):
     in_proxy = f"http://proxy:{PROXY_LISTEN}"
     no_proxy = "localhost,127.0.0.1,::1,proxy"
     args = [
+        "--name", s.dev_name,
         "--rm",
+        "--label", "claude.role=dev",
+        "--label", f"claude.session={s.session}",
         "--network", s.net_name,
         "--cap-drop", "NET_ADMIN",
         "--cap-drop", "NET_RAW",
@@ -369,6 +463,8 @@ def run_args(s, paths, extra_env):
         args += ["-e", f"{name}={in_proxy}"]
     for name in ("NO_PROXY", "no_proxy"):
         args += ["-e", f"{name}={no_proxy}"]
+    if s.host_ports:
+        args += ["-e", "CLAUDE_HOST_PORTS=" + ",".join(str(port) for port in s.host_ports)]
 
     userns = resolve_userns(s)
     if userns:
@@ -428,27 +524,41 @@ def run_args(s, paths, extra_env):
     return args
 
 
-def exec_claude(cmd):
-    if os.name != "nt":
-        os.execvp(cmd[0], cmd)
-    signal.signal(signal.SIGINT, lambda *_: None)
-    sys.exit(subprocess.call(cmd))
+def exit_on_signal(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+def run_session(s, create_cmd):
+    for name in ("SIGHUP", "SIGTERM"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), exit_on_signal)
+    try:
+        create_session_network(s)
+        must(create_cmd)
+        start_proxy(s)
+        signal.signal(signal.SIGINT, lambda *_: None)
+        attach = "-ai" if sys.stdin.isatty() else "-a"
+        return subprocess.call([s.engine, "start", attach, s.dev_name])
+    finally:
+        remove_session(s)
 
 
 def main():
     options, claude_args = parse_args(sys.argv[1:])
     s = Settings()
+    s.host_ports = resolve_host_ports(options.host_port)
+    s.host_target = resolve_host_target()
     ensure_engine(s)
     if not succeeds([s.engine, "image", "inspect", s.image]):
         die(f"image {s.image} is missing; run {SCRIPT_DIR / 'build.py'}")
     prepare_config(s)
     resolve_upstream(s)
-    ensure_network(s)
     ensure_bridge_network(s)
-    ensure_proxy(s)
+    remove_orphans(s)
+    ensure_proxy_image(s)
     args = run_args(s, options.paths, options.env)
     program = "bash" if options.shell else "claude"
-    exec_claude([s.engine, "run", *args, s.image, program, *claude_args])
+    sys.exit(run_session(s, [s.engine, "create", *args, s.image, program, *claude_args]))
 
 
 if __name__ == "__main__":
