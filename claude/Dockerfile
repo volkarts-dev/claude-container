@@ -178,7 +178,7 @@ USER ${USERNAME}
 ENV HOME=/home/${USERNAME} \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.npm-global \
     NODE_OPTIONS=--max-old-space-size=4096
-ENV PATH=${HOME}/.npm-global/bin:${HOME}/.dotnet/tools:${PATH}:/opt/hostexec
+ENV PATH=${HOME}/.npm-global/bin:${HOME}/.dotnet/tools:${PATH}
 
 RUN mkdir -p "${NPM_CONFIG_PREFIX}" "${HOME}/.claude" \
     && npm install -g @anthropic-ai/claude-code \
