@@ -383,8 +383,6 @@ def start_proxy(s):
     must([s.engine, "network", "connect", "--alias", "proxy", s.net_name, s.proxy_name], quiet=False)
     must([s.engine, "start", s.proxy_name])
     wait_proxy(s)
-    described = s.upstream.rpartition("@")[2] if s.upstream else "direct"
-    note(f"proxy {s.proxy_name} serving {s.net_name} -> {described}")
 
 
 def remove_session(s):
@@ -484,6 +482,9 @@ def run_args(s, paths, extra_env):
         name = names.assign(path)
         args += ["-v", f"{path}:/workspace/{name}"]
         note(f"mount {path} -> /workspace/{name}")
+
+    for port in s.host_ports:
+        note(f"port localhost:{port} -> {s.host_target or s.host_internal}:{port}")
 
     args += ["-w", f"/workspace/{workdir_name}"]
 
