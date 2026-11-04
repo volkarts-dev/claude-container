@@ -52,7 +52,8 @@ unprivileged user (`dev` by default) created with the *host's* uid/gid, so files
 into the mounted workspace keep the right ownership. `tini` is the entrypoint so signals
 and zombie processes behave; under it `entrypoint.sh` starts an Xvfb virtual X server on
 `DISPLAY=:99` (pick another with `-e DISPLAY=:N`) before running claude or bash, so GUI
-programs and tests run headless without `xvfb-run`.
+programs and tests run headless without `xvfb-run`. The locale is `en_US.UTF-8` and the
+timezone `Europe/Berlin`; another zone can be picked per start with `-e TZ=Area/City`.
 
 There is no way to become root inside it: `sudo` is not installed, `su` and the other
 switch-user tools are deleted, every setuid/setgid bit in the image is cleared at build

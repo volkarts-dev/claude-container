@@ -6,9 +6,7 @@ ARG USERNAME=dev
 ARG USER_UID=1000
 ARG USER_GID=1000
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+ENV DEBIAN_FRONTEND=noninteractive
 
 # C/C++ tooling comes from the distro too: gcc and clang, clang-format (with
 # git-clang-format and clang-format-diff), the clang compiler-rt runtimes and the
@@ -81,6 +79,18 @@ RUN set -eux; \
         zlib1g \
         $SANITIZERS; \
     rm -rf /var/lib/apt/lists/*
+
+# Locale and timezone: en_US.UTF-8 is generated here (the base image only has C.UTF-8),
+# and the zone is set both as /etc/localtime and as TZ, since not every runtime reads both
+ENV LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    TZ=Europe/Berlin
+RUN set -eux; \
+    sed -i 's/^# *\(en_US.UTF-8 UTF-8\)$/\1/' /etc/locale.gen; \
+    locale-gen; \
+    locale -a | grep -qx en_US.utf8; \
+    ln -sfn "/usr/share/zoneinfo/${TZ}" /etc/localtime; \
+    date
 
 # Node.js from the official nodejs.org build (latest v${NODE_MAJOR}.x), checksum verified
 RUN set -eux; \
