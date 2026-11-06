@@ -130,16 +130,29 @@ named after its last path component, with a `-2`, `-3` suffix on collisions:
 ./start.py ../shared-lib ~/data
 ```
 
-Pass arguments through to `claude` itself after `--`:
+Options the start script does not know are passed through to `claude` itself, or to
+`bash` with `-s`. The first unknown option and everything after it go to the program,
+so the script's own options and the paths to mount have to come before it:
 
 ```sh
-./start.py -- --resume
-./start.py ../shared-lib -- --model opus
+./start.py --resume
+./start.py ../shared-lib --model opus
+./start.py -s -c 'dotnet --info'
+```
+
+Everything after `--` is passed through as well. That is needed for arguments that do
+not start with a dash, like a prompt, or that the script would take for its own, like
+`-h`:
+
+```sh
+./start.py -- "explain this repository"
+./start.py -- --help
 ```
 
 ```powershell
-./start.ps1 ..\shared-lib '--' --model opus
-./start.ps1 ..\shared-lib --% -- --model opus
+./start.ps1 ..\shared-lib --model opus
+./start.ps1 '--' "explain this repository"
+./start.ps1 --% -- "explain this repository"
 ```
 
 Inside a PowerShell session a bare `--` is consumed by PowerShell itself before the

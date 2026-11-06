@@ -24,6 +24,8 @@ PASSTHROUGH_VARS = (
     "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
 )
+FLAG_OPTIONS = {"-h", "--help", "-s", "--shell"}
+VALUE_OPTIONS = {"-e", "--env", "--host-port"}
 
 DESCRIPTION = """\
 Starts an egress proxy for this session, then claude in a container. The
@@ -31,7 +33,11 @@ current directory is always mounted and used as the working directory. Each
 additional PATH is mounted read-write under /workspace, named after the last
 component of that path.
 
-Anything after -- is passed on to claude itself, or to bash with -s.
+The first option this script does not know, and everything after it, is
+passed on to claude itself, or to bash with -s. Options of this script and
+PATHs have to come before it. Anything after -- is passed on as well, which
+also covers arguments that do not start with a dash or clash with an option
+of this script, like a prompt or claude's own --help.
 
 Environment variables reach the container only when named: -e NAME forwards
 the host's value (nothing is set when it is unset on the host), -e NAME=VALUE
@@ -181,17 +187,45 @@ def host_port(text):
     return port
 
 
+def split_args(argv):
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            return argv[:i], argv[i + 1:]
+        if arg.startswith("--"):
+            name, equals, _ = arg.partition("=")
+            if name in VALUE_OPTIONS:
+                i += 1 if equals else 2
+                continue
+            if name in FLAG_OPTIONS and not equals:
+                i += 1
+                continue
+            return argv[:i], argv[i:]
+        if arg.startswith("-") and len(arg) > 1:
+            j = 1
+            while j < len(arg) and "-" + arg[j] in FLAG_OPTIONS:
+                j += 1
+            if j == len(arg):
+                i += 1
+                continue
+            if "-" + arg[j] in VALUE_OPTIONS:
+                i += 1 if j + 1 < len(arg) else 2
+                continue
+            return argv[:i], argv[i:]
+        i += 1
+    return argv, []
+
+
 def parse_args(argv):
-    claude_args = []
-    if "--" in argv:
-        split = argv.index("--")
-        argv, claude_args = argv[:split], argv[split + 1:]
+    argv, claude_args = split_args(argv)
     parser = argparse.ArgumentParser(
         prog="start.py",
-        usage="%(prog)s [-s] [-e NAME[=VALUE]]... [--host-port PORT]... [PATH...] [-- CLAUDE_ARG...]",
+        usage="%(prog)s [-s] [-e NAME[=VALUE]]... [--host-port PORT]... [PATH...] [[--] ARG...]",
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
     parser.add_argument("paths", nargs="*", metavar="PATH")
     parser.add_argument("-s", "--shell", action="store_true",
