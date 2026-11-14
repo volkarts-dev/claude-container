@@ -37,7 +37,7 @@ Two containers on two networks:
 **The dev container** (`claude/Dockerfile`) is Debian 13 slim with Node.js (from the
 official nodejs.org tarball, checksum verified), the .NET SDK, PowerShell (from the
 official GitHub release tarball, checksum verified), `git`, `git-lfs`, `ripgrep`,
-`fd-find`, `jq`, build and test tooling (including CMake, Ninja, `clang` and
+`fd-find`, `jq`, build and test tooling (including CMake, Ninja, ccache, `clang` and
 `clang-format` from the Debian archive, the GCC and clang sanitizer runtimes, Playwright
 with Chromium and the X11/Wayland/OpenGL/Vulkan and FreeType development headers needed
 to build windowing and graphics libraries such as GLFW), Python 3 and the usual shell

@@ -9,7 +9,7 @@ ARG USER_GID=1000
 ENV DEBIAN_FRONTEND=noninteractive
 
 # C/C++ tooling comes from the distro too: gcc and clang, clang-format (with
-# git-clang-format and clang-format-diff), the clang compiler-rt runtimes and the
+# git-clang-format and clang-format-diff), ccache, the clang compiler-rt runtimes and the
 # GCC sanitizer runtimes (ASan, UBSan, plus LSan, TSan, HWASan where gcc has them)
 RUN set -eux; \
     SANITIZERS="libasan8 libubsan1"; \
@@ -51,6 +51,7 @@ RUN set -eux; \
         pkg-config \
         cmake \
         ninja-build \
+        ccache \
         glslc \
         libx11-dev \
         libxext-dev \
