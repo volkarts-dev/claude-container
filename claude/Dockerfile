@@ -59,7 +59,7 @@ RUN set -eux; \
         cmake \
         ninja-build \
         ccache \
-        g++-mingw-w64-ucrt64 \
+        gcc-mingw-w64-ucrt64 \
         glslc \
         libx11-dev \
         libxext-dev \
