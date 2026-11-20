@@ -11,7 +11,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # C/C++ tooling comes from the distro too: gcc and clang, clang-format (with
 # git-clang-format and clang-format-diff), ccache, the clang compiler-rt runtimes and the
 # GCC sanitizer runtimes (ASan, UBSan, plus LSan, TSan, HWASan where gcc has them), the
-# MinGW-w64 cross compiler for 64-bit Windows and, on amd64 only, wine to run its output
+# MinGW-w64 cross compiler for 64-bit Windows and, on amd64 only, wine to run its output.
+# The MinGW-w64 toolchain is the UCRT one (x86_64-w64-mingw32ucrt-*) only: the MSVCRT
+# g++-mingw-w64-x86-64 packages are deliberately not installed.
 RUN set -eux; \
     SANITIZERS="libasan8 libubsan1"; \
     case "$(dpkg --print-architecture)" in \
@@ -57,7 +59,7 @@ RUN set -eux; \
         cmake \
         ninja-build \
         ccache \
-        g++-mingw-w64-x86-64 \
+        g++-mingw-w64-ucrt64 \
         glslc \
         libx11-dev \
         libxext-dev \

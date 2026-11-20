@@ -39,7 +39,8 @@ official nodejs.org tarball, checksum verified), the .NET SDK, PowerShell (from 
 official GitHub release tarball, checksum verified), `git`, `git-lfs`, `ripgrep`,
 `fd-find`, `jq`, build and test tooling (including CMake, Ninja, ccache, `clang` and
 `clang-format` from the Debian archive, the GCC and clang sanitizer runtimes, the
-MinGW-w64 cross compiler for 64-bit Windows with Wine to run its output (amd64 only), Playwright
+UCRT MinGW-w64 cross compiler for 64-bit Windows (`x86_64-w64-mingw32ucrt-*`; the MSVCRT
+one is not installed) with Wine to run its output (amd64 only), Playwright
 with Chromium and the X11/Wayland/OpenGL/Vulkan and FreeType development headers needed
 to build windowing and graphics libraries such as GLFW), Python 3 and the usual shell
 utilities. The Claude Code CLI is installed globally with npm. It runs as an
