@@ -63,8 +63,9 @@ private RFC1918/ULA ranges. `CONNECT` is limited to port 443 (`ConnectPort`), an
 HTTP to port 80 by the URL filter in `proxy/filter` (`FilterURLs`, `FilterDefaultDeny`):
 only `http://` URLs without a port or with `:80`, and `CONNECT` targets on `:443`, match
 it; everything else gets a `403 Filtered`. Next to tinyproxy the
-container runs one `socat` forwarder per [host port](#reaching-services-on-the-host), which
-passes connections on to the host gateway, or to `CLAUDE_HOST_TARGET` when set, and nowhere else.
+container runs one `socat` listener per [host port](#reaching-services-on-the-host), which
+hands each connection over to `start.py` through the container engine and opens no
+connection of its own.
 
 **The two networks** exist because of DNS. The dev container sits only on an `--internal`
 network of its own, which has no route off the host — the proxy is its single exit, and
@@ -195,48 +196,53 @@ CLAUDE_HOST_PORTS=51204,5173 ./start.py
 
 Inside the container the port answers on `localhost:PORT` (both `127.0.0.1` and `::1`),
 so URLs and configs work unchanged, and dev servers that check the `Host` header, like
-Vite's `server.allowedHosts`, see `localhost`. The path is plain TCP, so WebSockets and
-anything else on that port pass through:
+Vite's `server.allowedHosts`, see `localhost`. On the host the connection arrives at
+`127.0.0.1:PORT`, so the server can stay bound to `localhost`. The path is plain TCP, so
+WebSockets and anything else on that port pass through:
 
 ```
-claude-dev-<id>                  claude-proxy-<id>                 host
-localhost:PORT ── socat ───────► proxy:PORT ── socat ────────────► host gateway:PORT
+claude-dev-<id>               claude-proxy-<id>                         host
+localhost:PORT ── socat ────► proxy:PORT ── socat ── engine exec ─────► start.py ──► 127.0.0.1:PORT
 ```
 
-Only the listed ports are forwarded, and only to the host; tinyproxy and its port 80/443
-limits are untouched.
+The last hop is not a network connection. For every connection the proxy accepts, it asks
+`start.py` for a channel; `start.py` opens one with `docker exec -i` (or `podman exec -i`)
+into the proxy container and connects to `127.0.0.1:PORT` itself. The containers get no
+route to the host for this: no `host-gateway`, no listener on the host, no firewall
+rule. It works the same with Docker Desktop, a Linux engine, rootless podman, a podman
+machine and an engine inside WSL2 in NAT mode, where the containers cannot reach Windows'
+`localhost` otherwise.
 
-The host side is reached through `host.docker.internal` (docker) or
-`host.containers.internal` (podman), mapped to the engine's `host-gateway`. Where that
-lands depends on the engine:
+"The host" is the machine `start.py` runs on. Under WSL2, run it where the server runs:
+`start.ps1` or `python start.py` on Windows for a server on Windows, with a podman
+machine, Docker Desktop or a docker CLI that talks to the engine in WSL; `./start.py`
+inside the WSL distro for a server running there. In NAT mode a `start.py` inside WSL
+cannot reach a server bound to Windows' `localhost`.
 
-- Docker Desktop resolves it to the host itself, so a server bound to `localhost` works.
-- The Linux Docker engine, including one running inside WSL2, resolves `host-gateway` to
-  the default bridge's address (`docker0`), so a server bound only
-  to `localhost` is *not* reachable. Bind it to that address or to `0.0.0.0`, and keep
-  in mind that `0.0.0.0` also exposes it to the LAN unless a firewall says otherwise.
-- Podman picks the address from its network setup; under rootless pasta it maps
-  `169.254.1.2` to the host.
-- Podman on Windows runs in a podman machine, a WSL2 distro, so `host-gateway` leads
-  into the WSL2 VM, not to Windows. A server running on Windows is not reachable that way.
+`CLAUDE_HOST_TARGET` names another address for `start.py` to connect to instead of
+`127.0.0.1`: `::1` for a server that listens on the IPv6 loopback only, or any other
+address the host can reach:
 
-Where the host gateway does not lead to the machine the server runs on, set
-`CLAUDE_HOST_TARGET` to a host name or address the proxy container can reach it at; the
-forwarded ports then go there instead. For a server on Windows behind WSL2 in the
-default NAT mode, that is the WSL2 VM's default gateway (`ip route show default` inside
-WSL). The server has to listen on that interface or on `0.0.0.0`, and the Windows
-Firewall needs an inbound rule for the port, since it blocks the WSL network by default:
+```sh
+CLAUDE_HOST_TARGET=::1 ./start.py --host-port 5173
+```
 
 ```powershell
-$env:CLAUDE_HOST_TARGET="172.28.144.1"
-python start.py --host-port 51204
+$env:CLAUDE_HOST_TARGET="::1"
+python start.py --host-port 5173
 ```
 
-Vitest only listens on `localhost` by default. Started with `--api.host 0.0.0.0` (or any
-host other than `localhost`/`127.0.0.1`) it switches `api.allowWrite` and
-`api.allowExec` off unless they are set explicitly, which disables writing files and
-running tests through the API; turn them back on in the config only if nothing else can
-reach that address.
+Only the listed ports are forwarded, and only to that address; tinyproxy and its port
+80/443 limits are untouched. The proxy's listeners accept connections from the session's
+internal network only, so other containers on the outward network cannot use them.
+
+Each new connection waits for the engine to start an exec session; after that it is a
+plain byte stream. Up to 64 connections are relayed at a time, further ones wait for a
+free slot. A connection to a port nothing listens on at the host is closed right away.
+
+Vitest's API server can stay on its default `localhost` binding this way. Bound to any
+other host, Vitest switches `api.allowWrite` and `api.allowExec` off unless they are set
+explicitly, which disables writing files and running tests through the API.
 
 Each session has its own proxy, so sessions can forward different ports. Two sessions
 forwarding the same port both reach the same service on the host.
@@ -298,7 +304,7 @@ Both scripts are configured through environment variables.
 | `CLAUDE_USERNS` | auto | `--userns` for the dev container |
 | `CLAUDE_ENV` | unset | Comma-separated names of host variables forwarded into the dev container |
 | `CLAUDE_HOST_PORTS` | unset | Comma-separated host ports reachable as `localhost:PORT` in the dev container |
-| `CLAUDE_HOST_TARGET` | engine's `host-gateway` | Host name or address the proxy forwards the host ports to |
+| `CLAUDE_HOST_TARGET` | `127.0.0.1` | Host name or address `start.py` forwards the host ports to |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Host directory mounted as the Claude config |
 | `PROXY_IMAGE` / `PROXY_TAG` | `claude-proxy` / `latest` | Proxy image name and tag |
 | `PROXY_CONTAINER` | `claude-proxy` | Proxy container name prefix; the session id is appended |
@@ -308,8 +314,8 @@ Both scripts are configured through environment variables.
 ## Notes and limits
 
 - The proxy container lives exactly as long as its session, so every start pays for
-  starting tinyproxy. An existing proxy
-  image without `socat` cannot forward host ports; rebuild it with `./build.py proxy`.
+  starting tinyproxy. A proxy image built before host ports were handed over through
+  the engine does not start with `--host-port`; rebuild it with `./build.py proxy`.
   A shared `claude-proxy` container left over from earlier versions is not touched;
   remove it with `docker rm -f claude-proxy`.
 - `start.py` refuses a pre-existing `CLAUDE_BRIDGE` that is `--internal` — it would break

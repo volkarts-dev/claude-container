@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
 COPY filter /etc/tinyproxy/filter
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod 0755 /usr/local/bin/entrypoint.sh
+COPY host-port.sh /usr/local/bin/host-port
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/host-port
 
 EXPOSE 3128
 

@@ -4,11 +4,14 @@ import json
 import os
 import re
 import secrets
+import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -16,6 +19,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROXY_LISTEN = 3128
 DEV_PREFIX = "claude-dev"
 ORPHAN_GRACE = 60
+HOST_PORT_DIR = "/tmp/host-ports"
+MAX_TUNNELS = 64
+TUNNEL_GRACE = 5
 HOST_ALIASES = {
     "localhost", "127.0.0.1", "::1", "[::1]",
     "host.docker.internal", "host.containers.internal",
@@ -62,13 +68,14 @@ Networking
 Host ports
   Each --host-port PORT (or entry in CLAUDE_HOST_PORTS) makes a TCP port of the
   host reachable as localhost:PORT inside the claude container. A forwarder in
-  the claude container hands the connection to the proxy container, where a
-  second one passes it on to the host gateway on the same port. Only the named
-  ports are forwarded, and only to the host. The service on the host has to
-  listen on an address the host gateway reaches, which on a Linux engine is
-  not the loopback interface. Where the host gateway does not lead to the
-  machine the service runs on, like Windows behind a podman machine in WSL2,
-  CLAUDE_HOST_TARGET names the address to forward to instead."""
+  the claude container hands the connection to the proxy container, which
+  passes it on to this script through the container engine, one exec session
+  per connection. This script then connects to CLAUDE_HOST_TARGET (default
+  127.0.0.1) on the same port. No network route from the containers to the host
+  is involved, so a service bound to the loopback interface of the machine this
+  script runs on is reachable the same way with every engine, including one in
+  WSL2 in NAT mode. Only the named ports are forwarded, and only to that
+  address."""
 
 EPILOG = """\
 environment:
@@ -91,9 +98,8 @@ environment:
                    container, like -e NAME for each
   CLAUDE_HOST_PORTS comma-separated host ports reachable as localhost:PORT in
                    the container, like --host-port PORT for each
-  CLAUDE_HOST_TARGET host name or address the proxy forwards those ports to
-                   (default host.docker.internal or host.containers.internal,
-                   mapped to the engine's host-gateway)
+  CLAUDE_HOST_TARGET host name or address this script forwards those ports to
+                   (default 127.0.0.1)
   CLAUDE_CONFIG_DIR host directory mounted as the Claude config
                    (default ~/.claude)
   CLAUDE_IMAGE     dev image name (default claude-dev)
@@ -301,15 +307,17 @@ def resolve_host_ports(cli_ports):
 
 
 def resolve_host_target():
-    target = env("CLAUDE_HOST_TARGET").strip()
-    if not target:
-        return ""
+    target = env("CLAUDE_HOST_TARGET").strip() or "127.0.0.1"
     if re.match(r"^[A-Za-z0-9.\-]+$", target):
         return target
     match = re.match(r"^\[?([0-9A-Fa-f:.]+)\]?$", target)
     if match and ":" in match.group(1):
-        return f"[{match.group(1)}]"
+        return match.group(1)
     die(f"CLAUDE_HOST_TARGET: invalid host {target!r}")
+
+
+def host_address(host, port):
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
 def ensure_engine(s):
@@ -321,6 +329,18 @@ def ensure_engine(s):
 
 def network_field(s, name, field):
     return query([s.engine, "network", "inspect", "-f", "{{" + field + "}}", name])
+
+
+def network_subnet(s, name):
+    if s.engine == "podman":
+        template = "{{range .Subnets}}{{.Subnet}} {{end}}"
+    else:
+        template = "{{range .IPAM.Config}}{{.Subnet}} {{end}}"
+    subnets = query([s.engine, "network", "inspect", "-f", template, name]) or ""
+    for subnet in subnets.split():
+        if "." in subnet:
+            return subnet
+    die(f"cannot find the IPv4 subnet of network {name}")
 
 
 def create_session_network(s):
@@ -404,8 +424,8 @@ def start_proxy(s):
     if s.no_upstream:
         args += ["-e", f"NO_UPSTREAM={s.no_upstream}"]
     if host_ports:
-        args += ["-e", f"HOST_PORTS={host_ports}", "-e", f"HOST_TARGET={s.host_target or s.host_internal}"]
-    if s.host_gateway or (host_ports and not s.host_target):
+        args += ["-e", f"HOST_PORTS={host_ports}", "-e", f"HOST_PORTS_FROM={network_subnet(s, s.net_name)}"]
+    if s.host_gateway:
         args += ["--add-host", f"{s.host_internal}:host-gateway"]
     if s.proxy_publish:
         args += ["-p", f"{s.proxy_bind}:{s.proxy_publish}:{PROXY_LISTEN}"]
@@ -417,6 +437,151 @@ def start_proxy(s):
     must([s.engine, "network", "connect", "--alias", "proxy", s.net_name, s.proxy_name], quiet=False)
     must([s.engine, "start", s.proxy_name])
     wait_proxy(s)
+
+
+def detached():
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def write_all(stream, data):
+    view = memoryview(data)
+    while view:
+        view = view[stream.write(view):]
+
+
+def close_socket(sock):
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    sock.close()
+
+
+class HostRelay:
+    def __init__(self, s):
+        self.s = s
+        self.ports = set(s.host_ports)
+        self.slots = threading.BoundedSemaphore(MAX_TUNNELS)
+        self.lock = threading.Lock()
+        self.procs = set()
+        self.stopped = False
+
+    def spawn(self, cmd, **kwargs):
+        with self.lock:
+            if self.stopped:
+                return None
+            try:
+                proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL, **kwargs, **detached())
+            except OSError:
+                return None
+            self.procs.add(proc)
+            return proc
+
+    def reap(self, proc):
+        with self.lock:
+            self.procs.discard(proc)
+
+    def start(self):
+        requests = f"{HOST_PORT_DIR}/requests"
+        if not succeeds([self.s.engine, "exec", self.s.proxy_name, "test", "-p", requests]):
+            die(f"proxy {self.s.proxy_name} cannot hand host ports over; "
+                f"rebuild its image with {SCRIPT_DIR / 'build.py'} proxy")
+        control = self.spawn([self.s.engine, "exec", self.s.proxy_name,
+                              "sh", "-c", f"exec 3<>{requests}; exec cat <&3"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        if control is None:
+            die(f"cannot read connection requests from proxy {self.s.proxy_name}")
+        threading.Thread(target=self.serve, args=(control,), daemon=True).start()
+
+    def stop(self):
+        with self.lock:
+            self.stopped = True
+            procs = list(self.procs)
+        for proc in procs:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def serve(self, control):
+        for line in control.stdout:
+            match = re.match(r"^(\d+)-(\d+)$", line.decode("ascii", "replace").strip())
+            if not match or int(match.group(1)) not in self.ports:
+                continue
+            self.slots.acquire()
+            threading.Thread(target=self.tunnel, args=(int(match.group(1)), match.group(0)), daemon=True).start()
+
+    def connect(self, port):
+        try:
+            target = socket.create_connection((self.s.host_target, port), timeout=10)
+        except OSError:
+            return None
+        target.settimeout(None)
+        return target
+
+    def tunnel(self, port, request):
+        target = proc = None
+        try:
+            target = self.connect(port)
+            proc = self.spawn([self.s.engine, "exec", "-i", self.s.proxy_name, "socat", "STDIN!!STDOUT,shut-close",
+                               f"UNIX-CONNECT:{HOST_PORT_DIR}/{request}.sock,retry=50,interval=0.1"],
+                              bufsize=0, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            if proc is None:
+                return
+            if target is None:
+                proc.stdin.close()
+                self.finish(proc)
+                return
+            upstream = threading.Thread(target=self.upstream, args=(proc, target), daemon=True)
+            upstream.start()
+            self.downstream(target, proc)
+            self.finish(proc)
+            upstream.join(TUNNEL_GRACE)
+        finally:
+            if target is not None:
+                close_socket(target)
+            if proc is not None:
+                self.reap(proc)
+            self.slots.release()
+
+    def upstream(self, proc, target):
+        try:
+            while True:
+                data = proc.stdout.read(65536)
+                if not data:
+                    break
+                target.sendall(data)
+            target.shutdown(socket.SHUT_WR)
+        except (OSError, ValueError):
+            pass
+
+    def downstream(self, target, proc):
+        try:
+            while True:
+                readable, _, _ = select.select([target], [], [], 1)
+                if not readable:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                data = target.recv(65536)
+                if not data:
+                    break
+                write_all(proc.stdin, data)
+        except (OSError, ValueError):
+            pass
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    def finish(self, proc):
+        try:
+            proc.wait(timeout=TUNNEL_GRACE)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
 
 def remove_session(s):
@@ -518,7 +683,7 @@ def run_args(s, paths, extra_env):
         note(f"mount {path} -> /workspace/{name}")
 
     for port in s.host_ports:
-        note(f"port localhost:{port} -> {s.host_target or s.host_internal}:{port}")
+        note(f"port localhost:{port} -> {host_address(s.host_target, port)}")
 
     args += ["-w", f"/workspace/{workdir_name}"]
 
@@ -567,14 +732,18 @@ def run_session(s, create_cmd):
     for name in ("SIGHUP", "SIGTERM"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), exit_on_signal)
+    relay = HostRelay(s)
     try:
         create_session_network(s)
         must(create_cmd)
         start_proxy(s)
+        if s.host_ports:
+            relay.start()
         signal.signal(signal.SIGINT, lambda *_: None)
         attach = "-ai" if sys.stdin.isatty() else "-a"
         return subprocess.call([s.engine, "start", attach, s.dev_name])
     finally:
+        relay.stop()
         remove_session(s)
 
 

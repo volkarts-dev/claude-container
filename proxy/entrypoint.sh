@@ -31,12 +31,14 @@ if [ -n "${HOST_PORTS:-}" ]; then
     if ! command -v socat >/dev/null 2>&1; then
         printf 'socat is missing, rebuild the proxy image; host ports %s are not forwarded\n' "$HOST_PORTS" >&2
     else
+        mkdir -p /tmp/host-ports
+        mkfifo /tmp/host-ports/requests
         IFS=,
         for port in $HOST_PORTS; do
-            socat TCP-LISTEN:"$port",fork TCP:"$HOST_TARGET":"$port" &
+            socat TCP4-LISTEN:"$port",fork,reuseaddr,range="$HOST_PORTS_FROM" EXEC:"/usr/local/bin/host-port $port",nofork &
         done
         unset IFS
-        printf 'forwarding ports %s to %s\n' "$HOST_PORTS" "$HOST_TARGET" >&2
+        printf 'handing ports %s from %s over to the host\n' "$HOST_PORTS" "$HOST_PORTS_FROM" >&2
     fi
 fi
 
