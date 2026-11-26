@@ -78,6 +78,8 @@ RUN set -eux; \
         libkrb5-3 \
         libgssapi-krb5-2 \
         libstdc++6 \
+        mingw-w64 \
+        wine \
         zlib1g \
         $SANITIZERS; \
     rm -rf /var/lib/apt/lists/*
@@ -172,6 +174,9 @@ RUN set -eux; \
     npm cache clean --force; \
     rm -rf /var/lib/apt/lists/*; \
     playwright --version
+
+# electron builder stuff
+RUN npx electron-builder install-app-deps
 
 # The entrypoint starts Xvfb as the container user, which can't create the X
 # socket directory itself the way the X server expects it (root-owned, sticky)
