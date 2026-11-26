@@ -38,10 +38,11 @@ Two containers on two networks:
 official nodejs.org tarball, checksum verified), the .NET SDK, PowerShell (from the
 official GitHub release tarball, checksum verified), `git`, `git-lfs`, `ripgrep`,
 `fd-find`, `jq`, build and test tooling (including CMake, Ninja, ccache, `clang` and
-`clang-format` from the Debian archive, the GCC and clang sanitizer runtimes, Playwright
-with Chromium and the X11/Wayland/OpenGL/Vulkan and FreeType development headers needed
-to build windowing and graphics libraries such as GLFW), Python 3 and the usual shell
-utilities. The Claude Code CLI is installed globally with npm. It runs as an
+`clang-format` from the Debian archive, the GCC and clang sanitizer runtimes, the
+UCRT MinGW-w64 cross compiler for 64-bit Windows with Wine to run its output (amd64 only),
+Playwright with Chromium and the X11/Wayland/OpenGL/Vulkan and FreeType development
+headers needed to build windowing and graphics libraries such as GLFW), Python 3 and the
+usual shell utilities. The Claude Code CLI is installed globally with npm. It runs as an
 unprivileged user (`dev` by default) created with the *host's* uid/gid, so files written
 into the mounted workspace keep the right ownership. `tini` is the entrypoint so signals
 and zombie processes behave; under it `entrypoint.sh` starts an Xvfb virtual X server on
@@ -71,7 +72,7 @@ connection of its own.
 network of its own, which has no route off the host — the proxy is its single exit, and
 no other session's containers are on it. The proxy also
 joins a normal user-defined bridge network, because the engines' *predefined* bridge
-networks serve no DNS and an internal network's resolver refuses to forward, which would 
+networks serve no DNS and an internal network's resolver refuses to forward, which would
 leave the proxy unable to resolve either its upstream or the sites it is asked to fetch.
 
 **The start script** (`start.py`) wires all of this up on every launch: it
